@@ -1,0 +1,713 @@
+import Quickshell
+import Quickshell.Io
+import Quickshell.Wayland
+import QtQuick
+import qs.Commons
+import qs.Ui
+import "OpenAiCompatBackend.js" as OpenAiCompatBackend
+import "AnthropicBackend.js" as AnthropicBackend
+import "ConversationModel.js" as ConversationModel
+import "Secrets.js" as Secrets
+import "ContextSanitizer.js" as ContextSanitizer
+
+Item {
+  id: root
+
+  property bool opened: false
+  readonly property string moduleName: "io.github.omacopilot"
+
+  // Auto-wired by shell.qml's panel Loader (see its onLoaded: `if ("shell"
+  // in item) item.shell = shell`) once this overlay is instantiated - not
+  // available yet during this Item's own Component.onCompleted, only once
+  // onShellChanged fires.
+  property var shell: null
+  onShellChanged: root.loadSettings()
+
+  property var settings: ({
+    backend: "openai-compatible",
+    model: "gpt-4o-mini",
+    endpointUrl: "https://api.openai.com/v1/chat/completions",
+    streaming: true,
+    includeClipboardContext: false,
+    includeActiveWindowContext: false,
+    maxContextChars: 4000
+  })
+  property bool settingsOpen: false
+
+  // Reads the persisted entry for this plugin id out of shell.json (mirrors
+  // what shell.qml's own updateEntryInline() looks up internally) since an
+  // overlay-kind root, unlike a BarWidget-kind root, has no built-in
+  // settings/setting() of its own.
+  function findSettingsEntry(cfg) {
+    if (!cfg) return null
+    var layout = cfg.bar && cfg.bar.layout
+    if (layout) {
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = layout[sections[s]] || []
+        for (var i = 0; i < arr.length; i++) {
+          if (arr[i] && arr[i].id === root.moduleName) return arr[i]
+        }
+      }
+    }
+    var plugins = cfg.plugins || []
+    for (var j = 0; j < plugins.length; j++) {
+      if (plugins[j] && plugins[j].id === root.moduleName) return plugins[j]
+    }
+    return null
+  }
+
+  function loadSettings() {
+    if (!root.shell) return
+    var found = root.findSettingsEntry(root.shell.shellConfig)
+    var merged = {
+      backend: "openai-compatible",
+      model: "gpt-4o-mini",
+      endpointUrl: "https://api.openai.com/v1/chat/completions",
+      streaming: true,
+      includeClipboardContext: false,
+      includeActiveWindowContext: false,
+      maxContextChars: 4000
+    }
+    if (found) for (var k in found) if (k !== "id") merged[k] = found[k]
+    root.settings = merged
+  }
+
+  function persistSetting(key, value) {
+    var entry = {}
+    for (var k in root.settings) entry[k] = root.settings[k]
+    entry[key] = value
+    root.settings = entry
+    if (root.shell && typeof root.shell.updateEntryInline === "function")
+      root.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function backendModule() {
+    return root.settings.backend === "anthropic" ? AnthropicBackend : OpenAiCompatBackend
+  }
+
+  // ---------------------------------------------------------------- chrome
+
+  property color background: Color.menu.background
+  property color foreground: Color.menu.text
+  property color border: Color.menu.border
+  property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
+  property color scrim: Color.menu.scrim
+  readonly property int cornerRadius: Style.cornerRadius
+  property string fontFamily: Style.font.menuFamily
+  property int contentMargin: Style.spacing.panelPadding
+  property int contentSpacing: Style.spacing.md
+  property int cardWidth: Math.min(Style.space(700), panel.width - Style.gapsOut * 2)
+  property int cardHeight: Math.min(Style.space(560), panel.height - Style.gapsOut * 2)
+
+  function open(payloadJson) {
+    root.opened = true
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function close() {
+    root.opened = false
+  }
+
+  function toggle() {
+    if (root.opened) root.close()
+    else root.open("{}")
+  }
+
+  // ------------------------------------------------------------ conversation
+
+  ListModel { id: conversation }
+
+  property int assistantRowIndex: -1
+  property string pendingBuffer: ""
+  property var activeBackendModule: null
+  property var lastUsage: null
+
+  function snapshotRows() {
+    var rows = []
+    for (var i = 0; i < conversation.count; i++) {
+      var item = conversation.get(i)
+      rows.push({ role: item.role, content: item.content, error: item.error })
+    }
+    return rows
+  }
+
+  function sendPrompt(text) {
+    var trimmed = String(text || "").trim()
+    if (!trimmed) return
+    // A prompt sent while a previous reply is still streaming finalizes that
+    // row as-is (whatever partial content it has) rather than losing it -
+    // startRequest() below is what actually cancels the in-flight Process.
+    if (root.assistantRowIndex !== -1) root.finishAssistantMessage()
+
+    conversation.append({ role: "user", content: trimmed, streaming: false, error: "" })
+    conversation.append({ role: "assistant", content: "", streaming: true, error: "" })
+    root.assistantRowIndex = conversation.count - 1
+    root.pendingBuffer = ""
+    Qt.callLater(function() { conversationList.positionViewAtEnd() })
+    root.startRequest()
+  }
+
+  function appendAssistantDelta(delta) {
+    if (root.assistantRowIndex < 0 || root.assistantRowIndex >= conversation.count) return
+    var row = conversation.get(root.assistantRowIndex)
+    conversation.setProperty(root.assistantRowIndex, "content", row.content + delta)
+    conversationList.positionViewAtEnd()
+  }
+
+  function finishAssistantMessage() {
+    if (root.assistantRowIndex >= 0 && root.assistantRowIndex < conversation.count)
+      conversation.setProperty(root.assistantRowIndex, "streaming", false)
+    root.assistantRowIndex = -1
+    root.pendingBuffer = ""
+  }
+
+  function finishAssistantError(message) {
+    if (root.assistantRowIndex >= 0 && root.assistantRowIndex < conversation.count) {
+      conversation.setProperty(root.assistantRowIndex, "streaming", false)
+      conversation.setProperty(root.assistantRowIndex, "error", String(message || "Something went wrong."))
+    }
+    root.assistantRowIndex = -1
+    root.pendingBuffer = ""
+  }
+
+  // ------------------------------------------------------- streaming request
+  //
+  // A single mktemp -> write body -> write curl config -> curl chain, reused
+  // across turns rather than spawned fresh each time - same reasoning and
+  // the same "wanted vs running" cancellation-race guard as OmaDeezer's
+  // mktemp -> curl -> stat art-download chain (BarWidget.qml there): a
+  // terminated Process still emits onExited, so only ever clearing
+  // runningRequestId inside that handler itself keeps a cancelled chain's
+  // late completion from being mistaken for the current one.
+  //
+  // The API key never appears in any Process.command (visible via
+  // /proc/*/cmdline to any other process on the system) - both the request
+  // body and every header (including Authorization/x-api-key) are written to
+  // private scratch files via stdin, and curl only ever receives the config
+  // file's path as an argument.
+
+  property int wantedRequestId: 0
+  property int runningRequestId: -1
+  property string reqCacheDir: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/io.github.omacopilot/req"
+  property bool reqCacheReady: false
+  property string activeBasePath: ""
+  property var sseState: ({})
+  // A non-2xx response from a provider isn't SSE-shaped (it's a single
+  // plain JSON error body), so no line of it ever matches a backend's
+  // parseSseLine() and the stream would otherwise finish with no error and
+  // no "done" - buffering the raw stdout alongside the SSE parse lets
+  // curlProc.onExited recover a real message from it when --fail-with-body
+  // reports a failure.
+  property string rawStdoutBuffer: ""
+  // Looked up fresh (not cached) on every send, so a key stored/changed in
+  // SettingsPanel mid-session is picked up immediately with no extra wiring
+  // - see the apiKeyLookupProc stage below.
+  property string apiKeyForRequest: ""
+
+  // Clipboard/active-window context, re-gathered fresh on every send (never
+  // cached across turns) so the model only ever sees what's live *right now*
+  // - see clipboardReadProc and buildOutgoingMessages() below. Neither is
+  // ever appended to the visible `conversation` ListModel; both are folded
+  // into a single untrusted-data message built fresh per request.
+  property string clipboardContextText: ""
+
+  function escapeCurlConfigValue(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
+  }
+
+  // Lines are joined with \u0001 (a control character that can't appear
+  // in a header value) rather than a real newline: this whole config gets
+  // sent to its writer Process over stdin as a single `read -r` line (see
+  // the comment on writeBodyProc/writeConfigProc below for why - QML's
+  // Process has no way to close stdin, so a receiving `cat > file` blocks
+  // on EOF forever). The receiving shell script converts \u0001 back to
+  // real newlines with `tr` before writing the file.
+  function buildCurlConfig(request) {
+    var lines = []
+    lines.push("url = \"" + root.escapeCurlConfigValue(request.url) + "\"")
+    for (var i = 0; i < request.headers.length; i++) {
+      var h = request.headers[i]
+      lines.push("header = \"" + root.escapeCurlConfigValue(h[0] + ": " + h[1]) + "\"")
+    }
+    lines.push("data-binary = @" + root.activeBasePath + ".json")
+    return lines.join("\u0001")
+  }
+
+  function stageFinished() {
+    var forId = root.runningRequestId
+    root.runningRequestId = -1
+    return forId === root.wantedRequestId
+  }
+
+  // Takes one or more paths and removes them in a single rm invocation.
+  // reqCleanupProc is one shared, reused Process instance - calling this
+  // multiple times in a row within the same synchronous handler would
+  // silently drop everything but the last call, since reassigning .command
+  // before a just-started process has actually run just reconfigures the
+  // same pending process rather than queuing a second one. Always batch
+  // every path a caller needs removed into one call instead.
+  function rmReqFiles(paths) {
+    var existing = []
+    for (var i = 0; i < paths.length; i++) if (paths[i]) existing.push(paths[i])
+    if (existing.length === 0) return
+    reqCleanupProc.command = ["rm", "-f", "--"].concat(existing)
+    reqCleanupProc.running = true
+  }
+
+  Process { id: reqCleanupProc }
+
+  // Wiped and recreated on every widget startup - files left by a prior,
+  // possibly ungracefully-killed session never linger, and a pre-existing
+  // symlink at this path can't redirect our writes elsewhere.
+  Process {
+    id: reqCacheInitProc
+    command: ["sh", "-c", "rm -rf -- \"$0\" && mkdir -p -- \"$0\"", root.reqCacheDir]
+    onExited: function(code) {
+      root.reqCacheReady = true
+      root.tryStartRequest()
+    }
+  }
+  Component.onCompleted: reqCacheInitProc.running = true
+
+  function startRequest() {
+    root.wantedRequestId += 1
+    if (apiKeyLookupProc.running) apiKeyLookupProc.running = false
+    if (clipboardReadProc.running) clipboardReadProc.running = false
+    if (mktempProc.running) mktempProc.running = false
+    if (writeBodyProc.running) writeBodyProc.running = false
+    if (writeConfigProc.running) writeConfigProc.running = false
+    if (curlProc.running) curlProc.running = false
+    root.tryStartRequest()
+  }
+
+  // First stage of the chain: a fresh secret-tool lookup right before every
+  // send (not a cached property) so a key stored/changed in SettingsPanel
+  // mid-session is picked up on the very next prompt with no extra wiring.
+  function tryStartRequest() {
+    if (root.runningRequestId !== -1) return
+    if (!root.reqCacheReady) return
+    if (root.wantedRequestId === 0) return // nothing has ever been sent yet
+    root.runningRequestId = root.wantedRequestId
+    root.sseState = {}
+    root.activeBackendModule = root.backendModule()
+    apiKeyLookupProc.command = Secrets.lookupCommand(root.settings.backend || "openai-compatible")
+    apiKeyLookupProc.running = true
+  }
+
+  Process {
+    id: apiKeyLookupProc
+    stdout: StdioCollector { id: apiKeyLookupOut; waitForEnd: true }
+    onExited: function(code) {
+      var key = String(apiKeyLookupOut.text || "").trim()
+      if (!root.stageFinished()) { root.tryStartRequest(); return }
+      root.apiKeyForRequest = key
+      root.runningRequestId = root.wantedRequestId
+      root.proceedToContext()
+    }
+  }
+
+  // wl-paste (not Quickshell.clipboardText) - Quickshell's own docs note the
+  // Wayland clipboard reads empty unless a quickshell window has keyboard
+  // focus, which won't reliably be true here. wl-paste goes through the
+  // wlr-data-control protocol instead, which mirrors the compositor
+  // clipboard regardless of focus - the same reason Omarchy's own first-
+  // party Clipboard.qml plugin shells out to wl-paste rather than using the
+  // QML property.
+  function proceedToContext() {
+    root.clipboardContextText = ""
+    if (root.settings.includeClipboardContext) {
+      clipboardReadProc.command = ["wl-paste", "--no-newline", "--type", "text"]
+      clipboardReadProc.running = true
+    } else {
+      root.proceedToMktemp()
+    }
+  }
+
+  Process {
+    id: clipboardReadProc
+    stdout: StdioCollector { id: clipboardReadOut; waitForEnd: true }
+    onExited: function(code) {
+      if (!root.stageFinished()) { root.tryStartRequest(); return }
+      root.runningRequestId = root.wantedRequestId
+      // A non-zero exit just means no text is on the clipboard right now
+      // (e.g. an image is copied instead) - not an error worth surfacing.
+      root.clipboardContextText = code === 0 ? String(clipboardReadOut.text || "") : ""
+      root.proceedToMktemp()
+    }
+  }
+
+  function proceedToMktemp() {
+    mktempProc.command = ["mktemp", root.reqCacheDir + "/req-XXXXXX"]
+    mktempProc.running = true
+  }
+
+  // Builds the array of {role, content} messages sent to the backend for
+  // this one request: the real conversation history plus, if enabled, one
+  // extra leading message carrying clipboard/active-window context. That
+  // context message is built fresh every call from current live state -
+  // it's never appended to the persisted `conversation` ListModel, so past
+  // turns never carry stale/resent context forward.
+  function buildOutgoingMessages() {
+    var messages = ConversationModel.toApiMessages(root.snapshotRows())
+    var parts = []
+    if (root.settings.includeClipboardContext) {
+      var clip = ContextSanitizer.formatClipboardPart(root.clipboardContextText)
+      if (clip) parts.push(clip)
+    }
+    if (root.settings.includeActiveWindowContext) {
+      var toplevel = ToplevelManager.activeToplevel
+      var win = ContextSanitizer.formatWindowPart(toplevel ? toplevel.title : "", toplevel ? toplevel.appId : "")
+      if (win) parts.push(win)
+    }
+    var contextMessage = ContextSanitizer.buildContextMessage(parts, root.settings.maxContextChars || 4000)
+    if (contextMessage) messages = [contextMessage].concat(messages)
+    return messages
+  }
+
+  Process {
+    id: mktempProc
+    stdout: StdioCollector { id: mktempOut; waitForEnd: true }
+    onExited: function(code) {
+      var path = String(mktempOut.text || "").trim()
+      if (!root.stageFinished()) { root.rmReqFiles([path]); root.tryStartRequest(); return }
+      if (code !== 0 || !path) { root.finishAssistantError("Could not prepare a temp file for the request."); return }
+      root.activeBasePath = path
+      root.runningRequestId = root.wantedRequestId
+
+      var request = root.activeBackendModule.buildRequest(root.settings, root.apiKeyForRequest, root.buildOutgoingMessages())
+      // JSON.stringify's compact output never contains a raw newline byte
+      // (any newline inside a string value comes out as the two characters
+      // \n, escaped) so it's always exactly one line - safe to send as a
+      // single `read -r` line. `read -r` (not `cat`) is what makes this
+      // work at all without an EOF: QML's Process.write() has no way to
+      // close stdin, so a receiving `cat > file` would block forever
+      // waiting for one; `read -r` only needs the newline we append below.
+      writeBodyProc.pendingContent = request.bodyJson
+      writeBodyProc.pendingRequest = request
+      writeBodyProc.command = ["sh", "-c", "IFS= read -r line && printf '%s' \"$line\" > \"$0\"", path + ".json"]
+      writeBodyProc.running = true
+    }
+  }
+
+  Process {
+    id: writeBodyProc
+    property string pendingContent: ""
+    property var pendingRequest: null
+    stdinEnabled: true
+    onStarted: { write(pendingContent + "\n"); pendingContent = "" }
+    onExited: function(code) {
+      if (!root.stageFinished()) { root.rmReqFiles([root.activeBasePath + ".json"]); root.tryStartRequest(); return }
+      if (code !== 0) { root.finishAssistantError("Could not write the request body."); return }
+      root.runningRequestId = root.wantedRequestId
+
+      var cfgText = root.buildCurlConfig(pendingRequest)
+      writeConfigProc.pendingContent = cfgText
+      // Single control-character-joined line in, real newlines restored
+      // via tr on the way to disk - see buildCurlConfig()'s comment for why.
+      writeConfigProc.command = ["sh", "-c", "IFS= read -r line && printf '%s' \"$line\" | tr '\\001' '\\n' > \"$0\"", root.activeBasePath + ".cfg"]
+      writeConfigProc.running = true
+    }
+  }
+
+  Process {
+    id: writeConfigProc
+    property string pendingContent: ""
+    stdinEnabled: true
+    onStarted: { write(pendingContent + "\n"); pendingContent = "" }
+    onExited: function(code) {
+      if (!root.stageFinished()) {
+        root.rmReqFiles([root.activeBasePath + ".json", root.activeBasePath + ".cfg"])
+        root.tryStartRequest()
+        return
+      }
+      if (code !== 0) { root.finishAssistantError("Could not write the request config."); return }
+      root.runningRequestId = root.wantedRequestId
+      root.rawStdoutBuffer = ""
+      // --fail-with-body: a non-2xx response is still a plain JSON error
+      // body (not SSE), so it must still reach stdout to be parseable -
+      // plain --fail would suppress it entirely - while making curl exit
+      // non-zero so onExited's failure path actually fires instead of the
+      // stream quietly "finishing" with no delta and no done.
+      curlProc.command = ["curl", "-N", "-sS", "--fail-with-body", "--max-time", "120", "-K", root.activeBasePath + ".cfg"]
+      curlProc.running = true
+    }
+  }
+
+  Process {
+    id: curlProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        if (root.runningRequestId !== root.wantedRequestId) return
+        root.rawStdoutBuffer += line + "\n"
+        root.handleSseLine(line)
+      }
+    }
+    stderr: StdioCollector { id: curlErr; waitForEnd: true }
+    onExited: function(code) {
+      root.rmReqFiles([root.activeBasePath, root.activeBasePath + ".json", root.activeBasePath + ".cfg"])
+      var matched = root.stageFinished()
+      if (!matched) { root.tryStartRequest(); return }
+      if (root.assistantRowIndex >= 0) {
+        var row = conversation.get(root.assistantRowIndex)
+        if (row.streaming) {
+          if (code !== 0) {
+            root.finishAssistantError(root.describeRequestFailure(code, root.rawStdoutBuffer, String(curlErr.text || "").trim()))
+          } else {
+            // curl exited cleanly (HTTP transport succeeded) but no `done`
+            // SSE event ever arrived - the connection ended before the
+            // provider finished (e.g. it crashed or was killed mid-stream).
+            // Whatever partial text arrived stays; just stop the spinner
+            // rather than leaving it stuck forever with no way to tell.
+            root.finishAssistantMessage()
+          }
+        }
+      }
+    }
+  }
+
+  // curl exit 22 (--fail-with-body) means the HTTP status was an error; the
+  // body is still a plain JSON error object (not SSE), so try to pull a
+  // real provider message out of it before falling back to raw text/stderr.
+  function describeRequestFailure(code, stdoutBuffer, stderrDetail) {
+    var trimmed = String(stdoutBuffer || "").trim()
+    if (trimmed) {
+      try {
+        var obj = JSON.parse(trimmed)
+        var msg = obj && obj.error && (obj.error.message || obj.error.type)
+        if (msg) return String(msg)
+      } catch (e) {
+        // not JSON - fall through to raw text below
+      }
+      if (trimmed.length <= 300) return trimmed
+    }
+    if (stderrDetail) return stderrDetail
+    return "Request failed (exit " + code + "). Check your connection, endpoint, and API key."
+  }
+
+  function handleSseLine(line) {
+    var mod = root.activeBackendModule || root.backendModule()
+    var result = mod.parseSseLine(line, root.sseState)
+    if (!result) return
+    if (result.error) { root.finishAssistantError(result.error); return }
+    if (result.delta) {
+      if (root.settings.streaming === false) root.pendingBuffer += result.delta
+      else root.appendAssistantDelta(result.delta)
+    }
+    if (result.usage) root.lastUsage = result.usage
+    if (result.done) {
+      if (root.settings.streaming === false && root.pendingBuffer) {
+        root.appendAssistantDelta(root.pendingBuffer)
+      }
+      root.finishAssistantMessage()
+    }
+  }
+
+  PanelWindow {
+    id: panel
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "omacopilot"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    exclusionMode: ExclusionMode.Ignore
+
+    Rectangle {
+      anchors.fill: parent
+      color: root.scrim
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      onClicked: root.close()
+    }
+
+    BorderSurface {
+      id: card
+      width: root.cardWidth
+      height: root.cardHeight
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+      padding: root.contentMargin
+
+      MouseArea { anchors.fill: parent; onClicked: {} }
+
+      Item {
+        id: keyCatcher
+        anchors.fill: parent
+        focus: true
+
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Escape) {
+            root.close()
+            event.accepted = true
+          }
+        }
+
+        Column {
+          anchors.fill: parent
+          anchors.topMargin: card.contentTopInset
+          anchors.rightMargin: card.contentRightInset
+          anchors.bottomMargin: card.contentBottomInset
+          anchors.leftMargin: card.contentLeftInset
+          spacing: root.contentSpacing
+
+          Item {
+            width: parent.width
+            height: Style.font.heading + Style.spacing.sm
+
+            Text {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "cOMApilot"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.heading
+            }
+
+            Button {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: String.fromCodePoint(0xF0493)
+              tooltipText: root.settingsOpen ? "Back" : "Settings"
+              foreground: root.foreground
+              selected: root.settingsOpen
+              onClicked: root.settingsOpen = !root.settingsOpen
+            }
+          }
+
+          Item {
+            width: parent.width
+            height: parent.height - Style.font.heading - Style.spacing.sm - root.contentSpacing
+
+            SettingsPanel {
+              id: settingsPanel
+              anchors { top: parent.top; left: parent.left; right: parent.right }
+              visible: root.settingsOpen
+              settings: root.settings
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onChanged: function(key, value) { root.persistSetting(key, value) }
+            }
+
+            Column {
+              anchors.fill: parent
+              visible: !root.settingsOpen
+              spacing: root.contentSpacing
+
+              ListView {
+                id: conversationList
+                width: parent.width
+                height: parent.height - inputRow.height - root.contentSpacing -
+                  (contextIndicator.visible ? contextIndicator.height + root.contentSpacing : 0)
+                clip: true
+                model: conversation
+                spacing: Style.spacing.md
+                boundsBehavior: Flickable.StopAtBounds
+
+                delegate: Column {
+                  id: bubble
+                  required property int index
+                  required property string role
+                  required property string content
+                  required property bool streaming
+                  required property string error
+
+                  width: conversationList.width
+                  spacing: Style.spacing.xs / 2
+
+                  Text {
+                    text: bubble.role === "user" ? "You" : "cOMApilot"
+                    color: root.foreground
+                    opacity: 0.55
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    width: bubble.width
+                    textFormat: Text.PlainText
+                    text: bubble.content + (bubble.streaming ? " ▍" : "")
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Text {
+                    visible: bubble.error.length > 0
+                    width: bubble.width
+                    textFormat: Text.PlainText
+                    text: bubble.error
+                    color: Color.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+
+                Text {
+                  visible: conversation.count === 0
+                  anchors.centerIn: parent
+                  text: "Ask me anything…"
+                  color: root.foreground
+                  opacity: 0.5
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                }
+              }
+
+              Text {
+                id: contextIndicator
+                width: parent.width
+                visible: root.settings.includeClipboardContext || root.settings.includeActiveWindowContext
+                text: "Context: " + [
+                  root.settings.includeClipboardContext ? "clipboard ✓" : null,
+                  root.settings.includeActiveWindowContext ? "active window ✓" : null
+                ].filter(function(x) { return !!x }).join("  ·  ")
+                color: root.foreground
+                opacity: 0.55
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Row {
+                id: inputRow
+                width: parent.width
+                height: promptField.implicitHeight
+                spacing: Style.spacing.sm
+
+                TextField {
+                  id: promptField
+                  width: parent.width - sendButton.width - Style.spacing.sm
+                  placeholderText: "Ask me anything…"
+                  foreground: root.foreground
+                  font.family: root.fontFamily
+                  onAccepted: {
+                    root.sendPrompt(text)
+                    text = ""
+                  }
+                }
+
+                Button {
+                  id: sendButton
+                  text: "Send"
+                  bordered: true
+                  foreground: root.foreground
+                  onClicked: {
+                    root.sendPrompt(promptField.text)
+                    promptField.text = ""
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

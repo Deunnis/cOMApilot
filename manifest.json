@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.omacopilot",
+  "name": "cOMApilot",
+  "version": "0.1.0",
+  "author": "Deunnis",
+  "license": "MIT",
+  "description": "An AI assistant that streams answers and, with your explicit confirmation, can act: open files, run a small set of safe named actions, or drive other Omarchy plugins.",
+  "kinds": ["overlay", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Copilot.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "cOMApilot",
+    "description": "Click to open the AI copilot overlay.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "backend": "openai-compatible",
+      "model": "gpt-4o-mini",
+      "endpointUrl": "https://api.openai.com/v1/chat/completions",
+      "streaming": true,
+      "includeClipboardContext": false,
+      "includeActiveWindowContext": false,
+      "maxContextChars": 4000
+    },
+    "schema": [
+      { "key": "backend", "type": "enum", "label": "Backend", "options": ["openai-compatible", "anthropic"], "defaultValue": "openai-compatible" },
+      { "key": "model", "type": "string", "label": "Model", "defaultValue": "gpt-4o-mini" },
+      { "key": "endpointUrl", "type": "string", "label": "Endpoint URL", "description": "Chat-completions endpoint. Change this to point at OpenRouter, a local server, etc. Ignored for the Anthropic backend.", "defaultValue": "https://api.openai.com/v1/chat/completions" },
+      { "key": "streaming", "type": "boolean", "label": "Stream responses", "defaultValue": true },
+      { "key": "includeClipboardContext", "type": "boolean", "label": "Include clipboard as context", "description": "Sends your current clipboard text along with each prompt, clearly labeled as untrusted data.", "defaultValue": false },
+      { "key": "includeActiveWindowContext", "type": "boolean", "label": "Include active window as context", "description": "Sends the focused window's title and app id along with each prompt.", "defaultValue": false },
+      { "key": "maxContextChars", "type": "integer", "label": "Max context characters", "min": 500, "max": 20000, "step": 500, "defaultValue": 4000 }
+    ]
+  }
+}
