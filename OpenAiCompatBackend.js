@@ -3,9 +3,21 @@
 // /v1/chat/completions endpoint reuses this module unchanged - only
 // endpointUrl/auth differ, both handled by settings).
 
+// The endpoint is a free-text setting - if it's ever pointed at plain http
+// (by mistake, or a compromised/typo'd settings write), attaching the
+// Authorization header would send the API key in the clear. A key is only
+// ever attached when the endpoint is https:// - there is no exception for
+// loopback here, since a *keyed* request implies a real remote provider.
+// Unauthenticated loopback (Ollama, no key) is unaffected: with no apiKey,
+// this check never runs and plain http keeps working exactly as before.
 function buildRequest(settings, apiKey, messages) {
   var headers = [["Content-Type", "application/json"]]
-  if (apiKey) headers.push(["Authorization", "Bearer " + apiKey])
+  if (apiKey) {
+    if (!/^https:\/\//i.test(String(settings.endpointUrl || ""))) {
+      return { error: "Refusing to send your API key to a non-HTTPS endpoint. Use an https:// endpoint, or clear the stored API key if this server doesn't need one (e.g. a local Ollama server)." }
+    }
+    headers.push(["Authorization", "Bearer " + apiKey])
+  }
   return {
     url: settings.endpointUrl,
     headers: headers,

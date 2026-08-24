@@ -196,6 +196,20 @@ Column {
     onEditingFinished: root.changed("endpointUrl", text)
   }
 
+  Text {
+    // A stored key is only ever attached to https:// requests (enforced
+    // in OpenAiCompatBackend.js regardless of this warning) - this just
+    // makes the risk visible before the user even tries to send anything,
+    // for a keyed endpoint they just changed to something non-https.
+    visible: endpointField.visible && root.apiKeyStatus === "set" && !/^https:\/\//i.test(root.settings.endpointUrl || "")
+    width: parent.width
+    text: "This endpoint isn't https:// - your stored API key will not be sent, and requests will fail until this is fixed."
+    color: Color.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.WordWrap
+  }
+
   Toggle {
     width: parent.width
     label: "Stream responses"

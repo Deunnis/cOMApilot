@@ -280,6 +280,11 @@ Item {
 
   property int assistantRowIndex: -1
   property string pendingBuffer: ""
+  // Bounds a single reply's accumulated size - without this, a runaway or
+  // malicious server could stream indefinitely and grow this row's content
+  // (and, since the full history is resent every turn, every future
+  // request too) without limit.
+  property int maxAssistantContentChars: 200000
   property var activeBackendModule: null
   property var lastUsage: null
 
@@ -307,6 +312,12 @@ Item {
   property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy/io.github.comapilot"
   // Capped so the file can't grow unbounded over months of daily use.
   property int maxPersistedMessages: 200
+  // Restore-time bounds are deliberately separate from (and enforced
+  // independently of) the save-time cap above - this file could in
+  // principle be edited, corrupted, or replaced outside this plugin, so
+  // restoring never trusts its size or shape at face value.
+  property int maxSessionFileBytes: 5000000
+  property int maxRestoredFieldChars: 200000
 
   Process {
     id: stateDirInitProc
@@ -318,20 +329,43 @@ Item {
     path: root.stateDir + "/conversation.json"
     preload: true
     printErrors: false
+    // Atomic so a crash mid-write can never leave a half-written/corrupt
+    // JSON file behind; chmod'd to owner-only on every successful save
+    // (via onSaved below) since this holds real conversation content, not
+    // meant to be world-readable by default file-creation permissions.
+    atomicWrites: true
     onLoaded: root.restoreConversation()
     onLoadFailed: function(error) {} // FileNotFound is expected on first run
+    onSaved: {
+      chmodSessionFileProc.command = ["chmod", "600", sessionFile.path]
+      chmodSessionFileProc.running = true
+    }
   }
+
+  Process { id: chmodSessionFileProc }
 
   function restoreConversation() {
     var raw = sessionFile.text()
     if (!raw) return
+    if (raw.length > root.maxSessionFileBytes) {
+      console.warn("cOMApilot: session file is " + raw.length + " bytes (over the " + root.maxSessionFileBytes + " byte limit) - refusing to restore it")
+      return
+    }
     var rows
     try { rows = JSON.parse(raw) } catch (e) { return }
     if (!Array.isArray(rows)) return
-    for (var i = 0; i < rows.length; i++) {
+    // Keep only the most recent maxPersistedMessages regardless of how many
+    // the file actually contains - the same cap persistConversation() saves
+    // under, enforced again here since the file isn't trusted at face value.
+    var startIdx = Math.max(0, rows.length - root.maxPersistedMessages)
+    for (var i = startIdx; i < rows.length; i++) {
       var r = rows[i]
       if (!r || typeof r.role !== "string" || typeof r.content !== "string") continue
-      conversation.append({ role: r.role, content: r.content, streaming: false, error: r.error || "" })
+      var role = (r.role === "user" || r.role === "assistant") ? r.role : "assistant"
+      var content = r.content.length > root.maxRestoredFieldChars ? r.content.slice(0, root.maxRestoredFieldChars) : r.content
+      var errorText = typeof r.error === "string" ? r.error : ""
+      if (errorText.length > root.maxRestoredFieldChars) errorText = errorText.slice(0, root.maxRestoredFieldChars)
+      conversation.append({ role: role, content: content, streaming: false, error: errorText })
     }
     Qt.callLater(function() { conversationList.positionViewAtEnd() })
   }
@@ -361,7 +395,21 @@ Item {
   function appendAssistantDelta(delta) {
     if (root.assistantRowIndex < 0 || root.assistantRowIndex >= conversation.count) return
     var row = conversation.get(root.assistantRowIndex)
-    conversation.setProperty(root.assistantRowIndex, "content", row.content + delta)
+    var next = row.content + delta
+    if (next.length > root.maxAssistantContentChars) {
+      // Truncate, finalize the row, and stop pulling more data we'd only
+      // discard anyway - same cancel+suppress-restart pattern the Stop
+      // button uses, so a cancelled-mid-cap stage's own delayed onExited
+      // can't trigger a phantom re-send of the same prompt.
+      conversation.setProperty(root.assistantRowIndex, "content",
+        next.slice(0, root.maxAssistantContentChars) + "\n…[truncated - response exceeded the size limit]")
+      conversationList.positionViewAtEnd()
+      root.cancelInFlightRequest()
+      root.suppressAutoStart = true
+      root.finishAssistantMessage()
+      return
+    }
+    conversation.setProperty(root.assistantRowIndex, "content", next)
     conversationList.positionViewAtEnd()
   }
 
@@ -425,6 +473,14 @@ Item {
   // curlProc.onExited recover a real message from it when --fail-with-body
   // reports a failure.
   property string rawStdoutBuffer: ""
+  // A real provider error body is a small JSON object - way under this.
+  // Capped so a long-running successful stream doesn't grow this buffer
+  // for its entire duration for no reason (it's only ever read back on
+  // failure); further bytes past the cap are simply not appended.
+  property int maxRawStdoutBufferChars: 8192
+  // Belt-and-suspenders against one absurdly long single SSE line arriving
+  // before any of the size caps above would otherwise kick in.
+  property int maxSseLineChars: 65536
   // Looked up fresh (not cached) on every send, so a key stored/changed in
   // SettingsPanel mid-session is picked up immediately with no extra wiring
   // - see the apiKeyLookupProc stage below.
@@ -694,6 +750,14 @@ Item {
       root.runningRequestId = root.wantedRequestId
 
       var request = root.activeBackendModule.buildRequest(root.settings, root.apiKeyForRequest, root.buildOutgoingMessages())
+      if (request.error) {
+        // e.g. a keyed request whose endpoint isn't https:// - fail closed
+        // before anything is written to disk or sent anywhere. The mktemp
+        // file itself still needs cleaning up since it already exists.
+        root.rmReqFiles([root.activeBasePath])
+        root.finishAssistantError(request.error)
+        return
+      }
       // JSON.stringify's compact output never contains a raw newline byte
       // (any newline inside a string value comes out as the two characters
       // \n, escaped) so it's always exactly one line - safe to send as a
@@ -757,7 +821,8 @@ Item {
     stdout: SplitParser {
       onRead: function(line) {
         if (root.runningRequestId !== root.wantedRequestId) return
-        root.rawStdoutBuffer += line + "\n"
+        if (line.length > root.maxSseLineChars) line = line.slice(0, root.maxSseLineChars)
+        if (root.rawStdoutBuffer.length < root.maxRawStdoutBufferChars) root.rawStdoutBuffer += line + "\n"
         root.handleSseLine(line)
       }
     }
@@ -869,8 +934,14 @@ Item {
     if (!result) return
     if (result.error) { root.finishAssistantError(result.error); return }
     if (result.delta) {
-      if (root.settings.streaming === false) root.pendingBuffer += result.delta
-      else root.appendAssistantDelta(result.delta)
+      if (root.settings.streaming === false) {
+        // Same cap as appendAssistantDelta() below - simply stop growing
+        // past it here too, rather than accumulate content that would only
+        // be truncated at flush time anyway.
+        if (root.pendingBuffer.length < root.maxAssistantContentChars) root.pendingBuffer += result.delta
+      } else {
+        root.appendAssistantDelta(result.delta)
+      }
     }
     if (result.usage) root.lastUsage = result.usage
     if (result.done) {
@@ -1145,6 +1216,13 @@ Item {
 
                           Text {
                             width: parent.width
+                            // The label is built from model-controlled
+                            // strings (a target/pluginId/method/args the
+                            // assistant proposed) - forced PlainText so
+                            // Qt's default AutoText can never reinterpret
+                            // it as rich text (same class of risk, same
+                            // fix, as OmaDeezer's MPRIS-derived text).
+                            textFormat: Text.PlainText
                             text: actionCard.modelData.label
                             color: root.foreground
                             font.family: root.fontFamily

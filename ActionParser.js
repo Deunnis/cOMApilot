@@ -14,6 +14,18 @@ var NAMED_ACTION_LABELS = {
   "open-app-menu": "Open the app menu"
 }
 
+// Labels are built from model-controlled strings and flow into two Text
+// consumers: our own action-card label (forced Text.PlainText in
+// Copilot.qml) and the reused first-party ConfirmDialog's message Text,
+// which we don't own and which defaults to Text.AutoText - Qt's automatic
+// rich-text detection would kick in if the string looks like it contains
+// markup. Stripping angle brackets at the source, once, covers both
+// consumers - the same fix OmaDeezer already needed for MPRIS-derived text
+// reaching a tooltip it didn't control either.
+function stripAngleBrackets(s) {
+  return String(s).replace(/[<>]/g, "")
+}
+
 function isFlatPrimitiveArgs(args) {
   if (args === undefined || args === null) return true
   if (typeof args !== "object" || Array.isArray(args)) return false
@@ -38,7 +50,7 @@ function validateOpenPath(raw) {
   if (!isHttps && !isLocalPath) return null
   return {
     type: "open_path",
-    label: "Open: " + target,
+    label: "Open: " + stripAngleBrackets(target),
     command: ["xdg-open", target]
   }
 }
@@ -50,7 +62,7 @@ function validateRunNamedAction(raw, allowlist) {
   if (!command) return null
   return {
     type: "run_named_action",
-    label: NAMED_ACTION_LABELS[name] || ("Run: " + name),
+    label: NAMED_ACTION_LABELS[name] || ("Run: " + stripAngleBrackets(name)),
     command: command
   }
 }
@@ -65,7 +77,8 @@ function validatePluginIpcCall(raw, allowlist) {
   var argsJson = JSON.stringify(args || {})
   return {
     type: "plugin_ipc_call",
-    label: "Call " + pluginId + "." + method + (args ? " with " + argsJson : ""),
+    label: "Call " + stripAngleBrackets(pluginId) + "." + stripAngleBrackets(method) +
+      (args ? " with " + stripAngleBrackets(argsJson) : ""),
     command: ["omarchy-shell", "shell", "call", pluginId, method, argsJson]
   }
 }
