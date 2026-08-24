@@ -2,11 +2,11 @@
 
 An AI assistant overlay for [Omarchy](https://omarchy.org/), built as a Quickshell shell plugin. Streams answers from an LLM backend of your choice - cloud or a fully local/free model via Ollama.
 
-![cOMApilot overlay](screenshots/copilot.png)
+![cOMApilot overlay](screenshots/copilot.png) ![Settings panel](screenshots/settings.png)
 
-## Status: pre-release, not yet submitted to the marketplace
+## Status: feature-complete, not yet submitted to the marketplace
 
-This is under active development. What works today:
+Every planned feature is built and tested. What works today:
 
 - A fullscreen overlay (bar icon or hotkey to open) with streaming Q&A, wallpaper-adaptive accent color, and markdown-rendered replies
 - Three backend options: OpenAI-compatible (OpenAI, OpenRouter, or a local Ollama server), Anthropic, and a dedicated Ollama option that auto-detects a local server and offers a live model picker
@@ -16,7 +16,7 @@ This is under active development. What works today:
 - Optional, off-by-default context: your current clipboard text and/or the active window's title, sent along with your prompt so you can ask about what you're looking at. Both are clearly sanitized as untrusted data before ever reaching the model - see "Notes for reviewers" below
 - Optional, off-by-default **actions**: with the setting on, the assistant can propose a small, fixed set of actions (open a path, run one of a handful of named system actions, or drive an allowlisted method on another first-party Omarchy plugin) - every single one still requires you to explicitly click "Run" on a confirm dialog naming exactly what it will do before anything executes. See "How actions work" below
 
-**Still to do before this is submission-ready:** a hardening/docs pass (Phase 5 of the build plan) - reviewer-facing notes, non-goals, uninstall/secret-cleanup guidance. The core Q&A + context + action model is functionally complete and tested; what's left is polish and documentation, not the security-critical parts.
+Not yet submitted to omarchyplugins.com - this repo is currently private (a laptop-failure backup); making it public and opening a submission is a separate decision still to be made.
 
 ## Requirements
 
@@ -90,6 +90,17 @@ Conversation history is saved to `~/.local/state/omarchy/io.github.omacopilot/co
 - **No free-form command execution exists anywhere in this codebase, model-invoked or otherwise, and it's permanently out of scope** - not "later." Every action the model can ever propose is one of exactly three fixed types (`ActionAllowlist.js`), each mapped to a specific array-form command (never a shell string, so there's no interpolation/injection surface) with zero model-controlled arguments beyond what each type's own validation explicitly allows (`ActionParser.js`) - e.g. a "run a plugin method" proposal is checked against a hardcoded `pluginId`→allowed-methods table, and any extra `args` must be flat strings/numbers/booleans (a nested object/array is rejected outright). Parsing is fail-closed throughout: malformed JSON, a non-array payload, an unknown type, or a failed per-type check silently drops just that one action (logged, never guessed at).
 - **Actions only ever run after an explicit user confirmation**, via the same first-party `ConfirmDialog` component Omarchy's own menu uses, naming exactly what will execute. Confirmed actions are launched detached (fire-and-forget, not awaited) - deliberately: `xdg-open`/a terminal/an interactive screenshot picker can stay open indefinitely, and tracking exit status would leave a card stuck "running" for as long as that stayed open.
 - External commands this plugin runs: `curl` (the LLM request itself, and a separate short-timeout probe against a local Ollama server), `secret-tool` (keyring access), `mktemp`/`rm`/`kill`/a `read`-based shell one-liner (scratch-file plumbing and in-flight request cancellation, the latter chosen specifically so secrets never appear in argv), `wl-paste` (only if clipboard context is enabled), `magick` (read-only, extracts an accent color from your current wallpaper - falls back to the theme's default accent if it's missing or fails), `hyprctl` (the Blur slider - sets a global Hyprland decoration value and a layer rule for this overlay's own namespace, both undone by a Hyprland restart, no persistent config file is ever touched), and - only after an explicit per-action confirmation, and only when the actions setting is on - `xdg-open`, one of four specific first-party Omarchy binaries, or `omarchy-shell shell call` against the allowlisted plugin/method pairs above.
+
+## Not included
+
+These are deliberate, permanent exclusions from this plugin's design - not "not yet built":
+
+- No action type that writes, deletes, or moves files.
+- No action type that runs an arbitrary/model-supplied shell string, ever - the action schema is a fixed, closed set of 3 types (see "How actions work" above), not a way to reach a shell.
+- No autonomous multi-step tool use: every action is strictly one-shot propose → confirm → execute. The model never sees an action's result and never chains a further action on its own - a human re-engages for each one.
+- No user-editable action allowlist UI - `ActionAllowlist.js` is a hand-editable file; an in-app editor is a possible future nicety, not core.
+- No multi-session/named-conversation manager - one ongoing thread only (see "Notes on persistence" above).
+- No voice input or output.
 
 ## License
 
