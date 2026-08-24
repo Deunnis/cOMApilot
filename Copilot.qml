@@ -167,6 +167,26 @@ Item {
   Process { id: blurProc }
 
   onLiveBlurChanged: root.applyBlur()
+
+  // The blur *size* above is a global Hyprland setting, but a layer surface
+  // only actually gets blurred if something has told Hyprland to blur that
+  // specific namespace in the first place - confirmed by direct testing:
+  // with no layerrule at all, the Blur slider correctly changed
+  // decoration:blur:size (verified via `hyprctl getoption`) with zero
+  // visible effect on this overlay, since nothing had ever enabled blur for
+  // the "omacopilot" layer namespace. `hyprctl keyword layerrule` refuses on
+  // this Hyprland build ("can't work with non-legacy parsers"), so this
+  // uses the same `hyprctl eval` mechanism as applyBlur() instead - adds a
+  // live layer rule to the running compositor (not a static config file
+  // edit), confirmed visually to actually blur the background behind this
+  // overlay. Idempotent enough to just re-run on every load like
+  // applyBlur() already does.
+  function applyBlurLayerRule() {
+    layerRuleProc.command = ["hyprctl", "eval", "hl.config({layerrule={\"blur\",\"omacopilot\"}})"]
+    layerRuleProc.running = true
+  }
+
+  Process { id: layerRuleProc }
   property int contentMargin: Style.spacing.panelPadding
   property int contentSpacing: Style.spacing.md
   property int cardWidth: Math.min(Style.space(700), panel.width - Style.gapsOut * 2)
@@ -470,6 +490,7 @@ Item {
     stateDirInitProc.running = true
     for (var i = 0; i < root.visualSliderDefs.length; i++) root.relive(root.visualSliderDefs[i].key, root.visualSliderDefs[i].def)
     root.applyBlur()
+    root.applyBlurLayerRule()
   }
 
   // Confirmed by direct testing, in this order: (1) setting `.running =
