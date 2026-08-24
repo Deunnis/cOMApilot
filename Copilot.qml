@@ -171,18 +171,26 @@ Item {
   // The blur *size* above is a global Hyprland setting, but a layer surface
   // only actually gets blurred if something has told Hyprland to blur that
   // specific namespace in the first place - confirmed by direct testing:
-  // with no layerrule at all, the Blur slider correctly changed
+  // with no layer rule at all, the Blur slider correctly changed
   // decoration:blur:size (verified via `hyprctl getoption`) with zero
-  // visible effect on this overlay, since nothing had ever enabled blur for
-  // the "omacopilot" layer namespace. `hyprctl keyword layerrule` refuses on
-  // this Hyprland build ("can't work with non-legacy parsers"), so this
-  // uses the same `hyprctl eval` mechanism as applyBlur() instead - adds a
-  // live layer rule to the running compositor (not a static config file
-  // edit), confirmed visually to actually blur the background behind this
-  // overlay. Idempotent enough to just re-run on every load like
-  // applyBlur() already does.
+  // visible pixel difference behind this overlay (confirmed with
+  // `magick compare -metric AE`, not just eyeballed - the first attempt at
+  // this fix used a made-up `hl.config({layerrule=...})` shape that
+  // returned "ok" from `hyprctl eval` but was silently a no-op).
+  //
+  // This machine's Hyprland runs Omarchy's own Lua config bridge
+  // (`hyprctl systeminfo` reports `configProvider: lua`, and `hyprctl
+  // keyword` itself refuses with "can't work with non-legacy parsers") -
+  // there's no plain-text hyprland.conf `layerrule = blur, ...` line to
+  // reach for. The real API, found by reading Omarchy's own
+  // `/usr/share/hypr/stubs/hl.meta.lua` and a genuine first-party example
+  // in `/usr/share/omarchy/default/hypr/apps/omarchy-shell.lua`
+  // (`hl.layer_rule({match={namespace=...}, ...})`), is a *function* -
+  // `hl.layer_rule(spec)` - not a `hl.config()` key at all. Re-verified with
+  // the same pixel-diff technique: a real, nonzero difference appeared only
+  // once this correct call was used.
   function applyBlurLayerRule() {
-    layerRuleProc.command = ["hyprctl", "eval", "hl.config({layerrule={\"blur\",\"omacopilot\"}})"]
+    layerRuleProc.command = ["hyprctl", "eval", "hl.layer_rule({match={namespace=\"omacopilot\"},blur=true})"]
     layerRuleProc.running = true
   }
 
