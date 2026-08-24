@@ -25,7 +25,8 @@
       "streaming": true,
       "includeClipboardContext": false,
       "includeActiveWindowContext": false,
-      "maxContextChars": 4000
+      "maxContextChars": 4000,
+      "actionsEnabled": false
     },
     "schema": [
       { "key": "backend", "type": "enum", "label": "Backend", "options": ["openai-compatible", "anthropic"], "defaultValue": "openai-compatible" },
@@ -34,7 +35,8 @@
       { "key": "streaming", "type": "boolean", "label": "Stream responses", "defaultValue": true },
       { "key": "includeClipboardContext", "type": "boolean", "label": "Include clipboard as context", "description": "Sends your current clipboard text along with each prompt, clearly labeled as untrusted data.", "defaultValue": false },
       { "key": "includeActiveWindowContext", "type": "boolean", "label": "Include active window as context", "description": "Sends the focused window's title and app id along with each prompt.", "defaultValue": false },
-      { "key": "maxContextChars", "type": "integer", "label": "Max context characters", "min": 500, "max": 20000, "step": 500, "defaultValue": 4000 }
+      { "key": "maxContextChars", "type": "integer", "label": "Max context characters", "min": 500, "max": 20000, "step": 500, "defaultValue": 4000 },
+      { "key": "actionsEnabled", "type": "boolean", "label": "Allow the assistant to propose actions", "description": "Every proposed action still requires your explicit confirmation before it runs.", "defaultValue": false }
     ]
   }
 }

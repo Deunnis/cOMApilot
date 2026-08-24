@@ -9,6 +9,8 @@ import "AnthropicBackend.js" as AnthropicBackend
 import "ConversationModel.js" as ConversationModel
 import "Secrets.js" as Secrets
 import "ContextSanitizer.js" as ContextSanitizer
+import "ActionAllowlist.js" as ActionAllowlist
+import "ActionParser.js" as ActionParser
 
 Item {
   id: root
@@ -30,7 +32,8 @@ Item {
     streaming: true,
     includeClipboardContext: false,
     includeActiveWindowContext: false,
-    maxContextChars: 4000
+    maxContextChars: 4000,
+    actionsEnabled: false
   })
   property bool settingsOpen: false
 
@@ -67,7 +70,8 @@ Item {
       streaming: true,
       includeClipboardContext: false,
       includeActiveWindowContext: false,
-      maxContextChars: 4000
+      maxContextChars: 4000,
+      actionsEnabled: false
     }
     if (found) for (var k in found) if (k !== "id") merged[k] = found[k]
     root.settings = merged
@@ -118,6 +122,27 @@ Item {
 
   ListModel { id: conversation }
 
+  // Action cards are deliberately NOT stored as a ListModel row role.
+  // ListModel.setProperty() on an already-materialized delegate does not
+  // reliably re-notify a `required property var` bound to an array/object-
+  // typed dynamic role (confirmed by direct testing: neither the bound
+  // property's own onChanged handler nor a Repeater child's
+  // Component.onCompleted ever fired after a setProperty call, even though
+  // the ListModel's own underlying data was correctly updated) - a real
+  // platform quirk, not a logic bug in the code that reads the row back.
+  // Keeping actions in this plain object instead, keyed by row index, gives
+  // a normal QML property whose reassignment *does* properly notify every
+  // bound consumer, and the delegate reads it via a plain (non-required)
+  // property binding instead.
+  property var actionsByRow: ({})
+
+  function setRowActions(rowIndex, actions) {
+    var updated = {}
+    for (var k in root.actionsByRow) updated[k] = root.actionsByRow[k]
+    updated[String(rowIndex)] = actions
+    root.actionsByRow = updated
+  }
+
   property int assistantRowIndex: -1
   property string pendingBuffer: ""
   property var activeBackendModule: null
@@ -156,8 +181,21 @@ Item {
   }
 
   function finishAssistantMessage() {
-    if (root.assistantRowIndex >= 0 && root.assistantRowIndex < conversation.count)
-      conversation.setProperty(root.assistantRowIndex, "streaming", false)
+    if (root.assistantRowIndex >= 0 && root.assistantRowIndex < conversation.count) {
+      var idx = root.assistantRowIndex
+      conversation.setProperty(idx, "streaming", false)
+      // Parsed only when actionsEnabled is on - this is the master gate:
+      // the model was never even told the action schema otherwise (see
+      // buildOutgoingMessages()), and with actions never populated, no
+      // card/Run-button/execution path can ever be reached regardless of
+      // what a message's raw text happens to contain.
+      if (root.settings.actionsEnabled) {
+        var row = conversation.get(idx)
+        var actions = ActionParser.extractActions(row.content, ActionAllowlist)
+        for (var i = 0; i < actions.length; i++) actions[i].status = "pending"
+        if (actions.length > 0) root.setRowActions(idx, actions)
+      }
+    }
     root.assistantRowIndex = -1
     root.pendingBuffer = ""
   }
@@ -362,6 +400,12 @@ Item {
     }
     var contextMessage = ContextSanitizer.buildContextMessage(parts, root.settings.maxContextChars || 4000)
     if (contextMessage) messages = [contextMessage].concat(messages)
+    // Action instructions are trusted (built by us, not user/desktop data),
+    // so they lead ahead of the untrusted context message - only sent at
+    // all when actionsEnabled is on.
+    if (root.settings.actionsEnabled) {
+      messages = [{ role: "user", content: ActionAllowlist.buildActionPromptText() }].concat(messages)
+    }
     return messages
   }
 
@@ -485,6 +529,66 @@ Item {
     return "Request failed (exit " + code + "). Check your connection, endpoint, and API key."
   }
 
+  // ---------------------------------------------------------- action model
+  //
+  // Every action a completed message can carry was already validated
+  // fail-closed by ActionParser.js against the fixed ActionAllowlist.js
+  // tables before it ever became a card (see finishAssistantMessage()
+  // above) - nothing here re-checks that, this is purely the
+  // confirm-then-execute plumbing for actions already known-safe to run
+  // *if* the user clicks Run.
+
+  property int pendingConfirmRowIndex: -1
+  property int pendingConfirmActionIndex: -1
+
+  function requestActionConfirm(rowIndex, actionIndex) {
+    var action = (root.actionsByRow[String(rowIndex)] || [])[actionIndex]
+    if (!action || action.status !== "pending") return
+    root.pendingConfirmRowIndex = rowIndex
+    root.pendingConfirmActionIndex = actionIndex
+    confirmDialog.message = action.label
+    confirmDialog.confirmText = "Run"
+    confirmDialog.cancelText = "Cancel"
+    confirmDialog.selectedIndex = 0
+    confirmDialog.opened = true
+  }
+
+  // Launched via startDetached() rather than the tracked running=true/
+  // onExited pattern used for the streaming request above - confirmed by
+  // direct testing that several of these commands (opening a browser via
+  // xdg-open, a terminal, an interactive screenshot region-picker) don't
+  // return until the launched app itself exits, which for a browser can be
+  // arbitrarily long. Tracking exit status would leave a card stuck on
+  // "Running…" for as long as that app stays open. startDetached() spawns
+  // and immediately forgets the child instead - accurate to what we can
+  // actually promise the user ("this was launched"), not a claim about
+  // whether it succeeded. Since it's a synchronous, immediate spawn (not
+  // queued), reusing one Process instance across confirmations needs no
+  // queue/race-guard the way the tracked pattern above does.
+  function executeConfirmedAction() {
+    var rowIndex = root.pendingConfirmRowIndex
+    var actionIndex = root.pendingConfirmActionIndex
+    root.pendingConfirmRowIndex = -1
+    root.pendingConfirmActionIndex = -1
+    var action = (root.actionsByRow[String(rowIndex)] || [])[actionIndex]
+    if (!action || action.status !== "pending") return
+    actionExecProc.command = action.command
+    actionExecProc.startDetached()
+    root.markActionStatus(rowIndex, actionIndex, "launched")
+  }
+
+  function markActionStatus(rowIndex, actionIndex, status) {
+    var actions = (root.actionsByRow[String(rowIndex)] || []).slice()
+    if (actionIndex < 0 || actionIndex >= actions.length) return
+    var updated = {}
+    for (var k in actions[actionIndex]) updated[k] = actions[actionIndex][k]
+    updated.status = status
+    actions[actionIndex] = updated
+    root.setRowActions(rowIndex, actions)
+  }
+
+  Process { id: actionExecProc }
+
   function handleSseLine(line) {
     var mod = root.activeBackendModule || root.backendModule()
     var result = mod.parseSseLine(line, root.sseState)
@@ -542,6 +646,10 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          if (confirmDialog.opened) {
+            if (confirmDialog.handleKey(event)) event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_Escape) {
             root.close()
             event.accepted = true
@@ -616,6 +724,9 @@ Item {
                   required property string content
                   required property bool streaming
                   required property string error
+                  // Plain (non-required) binding, not a ListModel role -
+                  // see the comment on root.actionsByRow above for why.
+                  property var actions: root.actionsByRow[String(index)] || []
 
                   width: conversationList.width
                   spacing: Style.spacing.xs / 2
@@ -647,6 +758,68 @@ Item {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     wrapMode: Text.WordWrap
+                  }
+
+                  Column {
+                    width: bubble.width
+                    spacing: Style.spacing.xs
+                    visible: bubble.actions && bubble.actions.length > 0
+
+                    Repeater {
+                      model: bubble.actions || []
+
+                      BorderSurface {
+                        id: actionCard
+                        required property var modelData
+                        required property int index
+
+                        width: bubble.width
+                        height: actionColumn.implicitHeight + Style.spacing.sm * 2
+                        radius: root.cornerRadius
+                        color: root.background
+                        borderSpec: Border.flat(root.foreground, Math.max(1, Style.space(1)))
+
+                        Column {
+                          id: actionColumn
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
+                          anchors.margins: Style.spacing.sm
+                          spacing: Style.spacing.xs
+
+                          Text {
+                            width: parent.width
+                            text: actionCard.modelData.label
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                            wrapMode: Text.WordWrap
+                          }
+
+                          Row {
+                            spacing: Style.spacing.sm
+
+                            Button {
+                              text: "Run"
+                              bordered: true
+                              visible: actionCard.modelData.status === "pending"
+                              foreground: root.foreground
+                              onClicked: root.requestActionConfirm(bubble.index, actionCard.index)
+                            }
+
+                            Text {
+                              visible: actionCard.modelData.status === "launched"
+                              text: "Launched"
+                              color: root.foreground
+                              opacity: 0.7
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.caption
+                              anchors.verticalCenter: parent.verticalCenter
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
                 }
 
@@ -707,6 +880,24 @@ Item {
             }
           }
         }
+      }
+    }
+
+    ConfirmDialog {
+      id: confirmDialog
+      anchors.fill: parent
+      foreground: root.foreground
+      background: root.background
+      fontFamily: root.fontFamily
+      cornerRadius: root.cornerRadius
+      onConfirmed: {
+        confirmDialog.opened = false
+        root.executeConfirmedAction()
+      }
+      onCanceled: {
+        confirmDialog.opened = false
+        root.pendingConfirmRowIndex = -1
+        root.pendingConfirmActionIndex = -1
       }
     }
   }

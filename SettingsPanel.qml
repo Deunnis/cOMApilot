@@ -151,6 +151,16 @@ Column {
     onModified: root.changed("maxContextChars", value)
   }
 
+  Toggle {
+    width: parent.width
+    label: "Allow the assistant to propose actions"
+    description: "Every proposed action still requires your explicit confirmation before it runs."
+    checked: root.settings.actionsEnabled === true
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    onClicked: root.changed("actionsEnabled", !checked)
+  }
+
   Column {
     width: parent.width
     spacing: Style.spacing.sm
