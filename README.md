@@ -36,7 +36,7 @@ omarchy plugin add https://github.com/Deunnis/cOMApilot.git --enable
 By default it's placed on the right side of the bar; move it with:
 
 ```bash
-omarchy bar move io.github.omacopilot --section right
+omarchy bar move io.github.comapilot --section right
 ```
 
 (or place it via `~/.config/omarchy/shell.json`, which is where all the settings below are also stored per-widget).
@@ -44,7 +44,7 @@ omarchy bar move io.github.omacopilot --section right
 ## Uninstall
 
 ```bash
-omarchy plugin remove io.github.omacopilot
+omarchy plugin remove io.github.comapilot
 ```
 
 This does not automatically clear any API key stored via `secret-tool`; use the "Clear" button in the settings panel first if you want it removed from your keyring.
@@ -80,7 +80,7 @@ When the assistant proposes one, it appears as a card under its reply with a "Ru
 
 ## Notes on persistence
 
-Conversation history is saved to `~/.local/state/omarchy/io.github.omacopilot/conversation.json` and restored the next time the overlay loads, so a shell restart/reload doesn't lose your thread. This is a single ongoing conversation, not a multi-session history manager. The file is capped at the most recent 200 messages. Uninstalling the plugin does not delete it.
+Conversation history is saved to `~/.local/state/omarchy/io.github.comapilot/conversation.json` and restored the next time the overlay loads, so a shell restart/reload doesn't lose your thread. This is a single ongoing conversation, not a multi-session history manager. The file is capped at the most recent 200 messages. Uninstalling the plugin does not delete it.
 
 ## Notes for reviewers
 

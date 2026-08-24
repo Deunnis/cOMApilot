@@ -3,7 +3,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "io.github.omacopilot"
+  moduleName: "io.github.comapilot"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -17,7 +17,7 @@ BarWidget {
     horizontalMargin: 7.5
     onPressed: function(mouseButton) {
       if (!root.bar) return
-      root.bar.run("omarchy-shell shell toggle io.github.omacopilot '{}'")
+      root.bar.run("omarchy-shell shell toggle io.github.comapilot '{}'")
     }
   }
 }

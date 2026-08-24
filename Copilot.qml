@@ -17,7 +17,7 @@ Item {
   id: root
 
   property bool opened: false
-  readonly property string moduleName: "io.github.omacopilot"
+  readonly property string moduleName: "io.github.comapilot"
 
   // Auto-wired by shell.qml's panel Loader (see its onLoaded: `if ("shell"
   // in item) item.shell = shell`) once this overlay is instantiated - not
@@ -190,7 +190,7 @@ Item {
   // the same pixel-diff technique: a real, nonzero difference appeared only
   // once this correct call was used.
   function applyBlurLayerRule() {
-    layerRuleProc.command = ["hyprctl", "eval", "hl.layer_rule({match={namespace=\"omacopilot\"},blur=true})"]
+    layerRuleProc.command = ["hyprctl", "eval", "hl.layer_rule({match={namespace=\"comapilot\"},blur=true})"]
     layerRuleProc.running = true
   }
 
@@ -304,7 +304,7 @@ Item {
   // execution state, and re-offering a stale, possibly-already-run action
   // after a restart would be confusing at best.
 
-  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy/io.github.omacopilot"
+  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy/io.github.comapilot"
   // Capped so the file can't grow unbounded over months of daily use.
   property int maxPersistedMessages: 200
 
@@ -414,7 +414,7 @@ Item {
 
   property int wantedRequestId: 0
   property int runningRequestId: -1
-  property string reqCacheDir: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/io.github.omacopilot/req"
+  property string reqCacheDir: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/io.github.comapilot/req"
   property bool reqCacheReady: false
   property string activeBasePath: ""
   property var sseState: ({})
@@ -883,7 +883,7 @@ Item {
 
   // Split into two layer-shell surfaces rather than one full-screen one,
   // specifically so the Blur slider's layer rule (which targets this
-  // surface's namespace, "omacopilot" - see applyBlurLayerRule() above)
+  // surface's namespace, "comapilot" - see applyBlurLayerRule() above)
   // only blurs behind the small card, not the whole screen. Confirmed by
   // direct testing that a single full-screen surface with blur enabled
   // blurs everything behind it, since Hyprland blur is a per-surface
@@ -898,7 +898,7 @@ Item {
     visible: root.opened
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
-    WlrLayershell.namespace: "omacopilot-scrim"
+    WlrLayershell.namespace: "comapilot-scrim"
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
@@ -926,7 +926,7 @@ Item {
     // WlrLayershell qmltypes: neither exposes an x/y or centerIn concept at
     // all - positioning is anchor+margin only, so this is the only way to
     // center a fixed-size layer-shell surface).
-    WlrLayershell.namespace: "omacopilot"
+    WlrLayershell.namespace: "comapilot"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore

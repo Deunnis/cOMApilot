@@ -3,7 +3,7 @@
 // plain .js module, so these functions only build argv/scripts and parse
 // output - the actual Process elements live in Copilot.qml.
 
-var SERVICE = "io.github.omacopilot"
+var SERVICE = "io.github.comapilot"
 
 function secretKey(backend) {
   return "api-key-" + String(backend || "")
