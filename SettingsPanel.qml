@@ -16,6 +16,7 @@ Column {
 
   property var settings: ({})
   property color foreground: Color.menu.text
+  property color accentColor: Color.accent
   property string fontFamily: Style.font.menuFamily
 
   signal changed(string key, var value)
@@ -117,6 +118,7 @@ Column {
     value: root.backendValue()
     options: ["openai-compatible", "anthropic", "ollama"]
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onChanged: function(value) {
       root.changed("backend", value)
@@ -147,6 +149,7 @@ Column {
     value: root.settings.model || ""
     options: root.ollamaModels
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onChanged: function(value) { root.changed("model", value) }
   }
@@ -158,6 +161,7 @@ Column {
     placeholderText: "Model"
     text: root.settings.model || ""
     foreground: root.foreground
+    accent: root.accentColor
     font.family: root.fontFamily
     onEditingFinished: root.changed("model", text)
   }
@@ -170,6 +174,7 @@ Column {
     placeholderText: "Endpoint URL"
     text: root.settings.endpointUrl || ""
     foreground: root.foreground
+    accent: root.accentColor
     font.family: root.fontFamily
     onEditingFinished: root.changed("endpointUrl", text)
   }
@@ -179,6 +184,7 @@ Column {
     label: "Stream responses"
     checked: root.settings.streaming !== false
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onClicked: root.changed("streaming", !checked)
   }
@@ -189,6 +195,7 @@ Column {
     description: "Sent as clearly-labeled untrusted data, never as instructions."
     checked: root.settings.includeClipboardContext === true
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onClicked: root.changed("includeClipboardContext", !checked)
   }
@@ -199,6 +206,7 @@ Column {
     description: "Sends the focused window's title and app id."
     checked: root.settings.includeActiveWindowContext === true
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onClicked: root.changed("includeActiveWindowContext", !checked)
   }
@@ -211,6 +219,7 @@ Column {
     to: 20000
     stepSize: 500
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onModified: root.changed("maxContextChars", value)
   }
@@ -221,6 +230,7 @@ Column {
     description: "Every proposed action still requires your explicit confirmation before it runs."
     checked: root.settings.actionsEnabled === true
     foreground: root.foreground
+    accent: root.accentColor
     fontFamily: root.fontFamily
     onClicked: root.changed("actionsEnabled", !checked)
   }
@@ -253,6 +263,7 @@ Column {
         placeholderText: "Paste API key…"
         text: root.apiKeyDraft
         foreground: root.foreground
+        accent: root.accentColor
         font.family: root.fontFamily
         onTextChanged: root.apiKeyDraft = text
         onAccepted: root.storeKey()
@@ -262,6 +273,7 @@ Column {
         id: saveBtn
         text: "Save"
         foreground: root.foreground
+        accent: root.accentColor
         bordered: true
         onClicked: root.storeKey()
       }
@@ -270,6 +282,7 @@ Column {
         id: clearBtn
         text: "Clear"
         foreground: root.foreground
+        accent: root.accentColor
         bordered: true
         onClicked: root.clearKey()
       }

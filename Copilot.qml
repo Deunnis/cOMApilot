@@ -11,6 +11,7 @@ import "Secrets.js" as Secrets
 import "ContextSanitizer.js" as ContextSanitizer
 import "ActionAllowlist.js" as ActionAllowlist
 import "ActionParser.js" as ActionParser
+import "WallpaperPalette.js" as WallpaperPalette
 
 Item {
   id: root
@@ -104,6 +105,45 @@ Item {
   property int cardWidth: Math.min(Style.space(700), panel.width - Style.gapsOut * 2)
   property int cardHeight: Math.min(Style.space(560), panel.height - Style.gapsOut * 2)
 
+  // --------------------------------------------------- wallpaper-adaptive accent
+  //
+  // Same approach as OmaDeezer's popup: a 5-color histogram of the current
+  // wallpaper via ImageMagick, most-common color first, re-extracted whenever
+  // the wallpaper changes. Every accent-colored control below (Send/Run/
+  // Regenerate buttons, settings inputs, the user's own message bubbles)
+  // pulls from this instead of the theme's static Color.accent.
+  readonly property var backgroundService: root.shell ? root.shell.firstPartyServiceFor("omarchy.background") : null
+  readonly property string backgroundPath: backgroundService ? backgroundService.currentBackground : ""
+  property var paletteHex: []
+
+  // Raw histogram colors are often shadow-black or highlight-white; keep the
+  // hue but clamp lightness/saturation into a legible band - same formula
+  // and same reasoning as OmaDeezer's legibleAccent().
+  function legibleAccent(hex) {
+    var c = Qt.color(hex)
+    var l = Math.max(0.42, Math.min(0.72, c.hslLightness))
+    var s = Math.max(c.hslSaturation, 0.35)
+    return Qt.hsla(c.hslHue, s, l, 1.0)
+  }
+
+  readonly property color accentColor: root.paletteHex.length > 0 ? root.legibleAccent(root.paletteHex[0]) : Color.accent
+
+  function extractPalette() {
+    if (!root.backgroundPath) return
+    paletteProc.command = WallpaperPalette.paletteCommand(root.backgroundPath)
+    paletteProc.running = true
+  }
+
+  Process {
+    id: paletteProc
+    stdout: StdioCollector {
+      id: paletteOutput
+      onStreamFinished: root.paletteHex = WallpaperPalette.parsePaletteHex(paletteOutput.text)
+    }
+  }
+
+  onBackgroundPathChanged: root.extractPalette()
+
   function open(payloadJson) {
     root.opened = true
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -117,6 +157,7 @@ Item {
     if (root.opened) root.close()
     else root.open("{}")
   }
+
 
   // ------------------------------------------------------------ conversation
 
@@ -808,7 +849,7 @@ Item {
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               text: "cOMApilot"
-              color: root.foreground
+              color: root.accentColor
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
             }
@@ -819,6 +860,7 @@ Item {
               iconText: String.fromCodePoint(0xF0493)
               tooltipText: root.settingsOpen ? "Back" : "Settings"
               foreground: root.foreground
+              accent: root.accentColor
               selected: root.settingsOpen
               onClicked: root.settingsOpen = !root.settingsOpen
             }
@@ -834,6 +876,7 @@ Item {
               visible: root.settingsOpen
               settings: root.settings
               foreground: root.foreground
+              accentColor: root.accentColor
               fontFamily: root.fontFamily
               onChanged: function(key, value) { root.persistSetting(key, value) }
             }
@@ -870,20 +913,44 @@ Item {
 
                   Text {
                     text: bubble.role === "user" ? "You" : "cOMApilot"
+                    anchors.right: bubble.role === "user" ? parent.right : undefined
+                    anchors.left: bubble.role === "user" ? undefined : parent.left
                     color: root.foreground
                     opacity: 0.55
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
 
-                  Text {
+                  Item {
                     width: bubble.width
-                    textFormat: Text.PlainText
-                    text: bubble.content + (bubble.streaming ? " ▍" : "")
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    wrapMode: Text.WordWrap
+                    height: bubbleCard.height
+
+                    BorderSurface {
+                      id: bubbleCard
+                      anchors.right: bubble.role === "user" ? parent.right : undefined
+                      anchors.left: bubble.role === "user" ? undefined : parent.left
+                      width: Math.min(bubble.width * 0.82, Style.space(560))
+                      height: contentText.implicitHeight + Style.spacing.sm * 2
+                      radius: root.cornerRadius
+                      color: bubble.role === "user" ? Util.alpha(root.accentColor, 0.24) : Util.alpha(root.foreground, 0.06)
+                      borderSpec: Border.flat(bubble.role === "user" ? root.accentColor : Util.alpha(root.foreground, 0.18), Math.max(1, Style.space(1)))
+
+                      Text {
+                        id: contentText
+                        anchors.fill: parent
+                        anchors.margins: Style.spacing.sm
+                        // Markdown only for the assistant - a user's own
+                        // typed prompt is rendered as plain text, matching
+                        // what they actually typed rather than reinterpreting
+                        // any stray */_/# characters as formatting.
+                        textFormat: bubble.role === "assistant" ? Text.MarkdownText : Text.PlainText
+                        text: bubble.content + (bubble.streaming ? " ▍" : "")
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        wrapMode: Text.WordWrap
+                      }
+                    }
                   }
 
                   Text {
@@ -901,6 +968,7 @@ Item {
                     text: "Regenerate"
                     bordered: true
                     foreground: root.foreground
+                    accent: root.accentColor
                     visible: !bubble.streaming && bubble.role === "assistant"
                       && bubble.index === conversation.count - 1 && root.assistantRowIndex === -1
                     onClicked: root.regenerateLast()
@@ -950,6 +1018,7 @@ Item {
                               bordered: true
                               visible: actionCard.modelData.status === "pending"
                               foreground: root.foreground
+                              accent: root.accentColor
                               onClicked: root.requestActionConfirm(bubble.index, actionCard.index)
                             }
 
@@ -1017,6 +1086,7 @@ Item {
                   width: parent.width - sendButton.width - Style.spacing.sm
                   placeholderText: "Ask me anything…"
                   foreground: root.foreground
+                  accent: root.accentColor
                   font.family: root.fontFamily
                   onAccepted: {
                     root.sendPrompt(text)
@@ -1029,6 +1099,7 @@ Item {
                   text: root.assistantRowIndex !== -1 ? "Stop" : "Send"
                   bordered: true
                   foreground: root.foreground
+                  accent: root.accentColor
                   onClicked: {
                     if (root.assistantRowIndex !== -1) {
                       root.stopGenerating()
