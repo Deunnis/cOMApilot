@@ -64,7 +64,7 @@ Available from the gear icon inside the overlay:
 | Include active window as context | Off by default. Sends the focused window's title and app id with each prompt |
 | Max context characters | Truncation limit applied to the combined clipboard/window context |
 | Allow the assistant to propose actions | Off by default. See "How actions work" below - every proposed action still requires your explicit confirmation |
-| Blur / Transparency / Outline thickness / Corner roundness | Same 4 sliders as OmaDeezer's popup, same ranges and defaults. Blur sets Hyprland's *global* `decoration.blur.size` (affects every blurred surface, not just this overlay) and also registers a live layer rule enabling blur specifically for this overlay's own layer namespace, since a surface needs that before the global size has any visible effect on it at all; the other three sliders only reshape this overlay's own card. "Reset visual settings to defaults" restores all four |
+| Blur / Transparency / Outline thickness / Corner roundness | Same 4 sliders as OmaDeezer's popup, same ranges and defaults. Blur sets Hyprland's *global* `decoration.blur.size` (affects every blurred surface, not just this overlay) and registers a live layer rule enabling blur specifically for this overlay's own card. The overlay is two separate layer surfaces - a full-screen dim/click-to-close backdrop, and a small surface sized to just the card - specifically so blur only ever shows behind the card, never across the whole screen. The other three sliders only reshape the card itself. "Reset visual settings to defaults" restores all four |
 
 The settings panel scrolls (mouse wheel/drag) if it doesn't fit the overlay's height - the sliders live at the bottom.
 

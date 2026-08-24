@@ -197,8 +197,8 @@ Item {
   Process { id: layerRuleProc }
   property int contentMargin: Style.spacing.panelPadding
   property int contentSpacing: Style.spacing.md
-  property int cardWidth: Math.min(Style.space(700), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(Style.space(560), panel.height - Style.gapsOut * 2)
+  property int cardWidth: Math.min(Style.space(700), scrimWindow.width - Style.gapsOut * 2)
+  property int cardHeight: Math.min(Style.space(560), scrimWindow.height - Style.gapsOut * 2)
 
   // --------------------------------------------------- wallpaper-adaptive accent
   //
@@ -881,14 +881,26 @@ Item {
     }
   }
 
+  // Split into two layer-shell surfaces rather than one full-screen one,
+  // specifically so the Blur slider's layer rule (which targets this
+  // surface's namespace, "omacopilot" - see applyBlurLayerRule() above)
+  // only blurs behind the small card, not the whole screen. Confirmed by
+  // direct testing that a single full-screen surface with blur enabled
+  // blurs everything behind it, since Hyprland blur is a per-surface
+  // effect applied across a surface's entire geometry - there's no way to
+  // scope it to just part of one surface. No first-party Omarchy overlay
+  // uses this two-surface pattern (every one of them is a single
+  // full-screen PanelWindow with the card centered as a plain child Item),
+  // so this is a deliberate departure from that convention for this one
+  // reason.
   PanelWindow {
-    id: panel
+    id: scrimWindow
     visible: root.opened
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
-    WlrLayershell.namespace: "omacopilot"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    WlrLayershell.namespace: "omacopilot-scrim"
+    WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
 
     Rectangle {
@@ -900,18 +912,32 @@ Item {
       anchors.fill: parent
       onClicked: root.close()
     }
+  }
+
+  PanelWindow {
+    id: panel
+    visible: root.opened
+    implicitWidth: root.cardWidth
+    implicitHeight: root.cardHeight
+    color: "transparent"
+    // Deliberately no anchors on any edge - per the wlr-layer-shell
+    // protocol, a surface with neither edge of an axis anchored centers on
+    // that axis (confirmed against Quickshell's own PanelWindow/
+    // WlrLayershell qmltypes: neither exposes an x/y or centerIn concept at
+    // all - positioning is anchor+margin only, so this is the only way to
+    // center a fixed-size layer-shell surface).
+    WlrLayershell.namespace: "omacopilot"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    exclusionMode: ExclusionMode.Ignore
 
     BorderSurface {
       id: card
-      width: root.cardWidth
-      height: root.cardHeight
+      anchors.fill: parent
       radius: root.cornerRadius
-      anchors.centerIn: parent
       color: root.background
       borderSpec: root.borderSpec
       padding: root.contentMargin
-
-      MouseArea { anchors.fill: parent; onClicked: {} }
 
       Item {
         id: keyCatcher
