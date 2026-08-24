@@ -64,6 +64,9 @@ Available from the gear icon inside the overlay:
 | Include active window as context | Off by default. Sends the focused window's title and app id with each prompt |
 | Max context characters | Truncation limit applied to the combined clipboard/window context |
 | Allow the assistant to propose actions | Off by default. See "How actions work" below - every proposed action still requires your explicit confirmation |
+| Blur / Transparency / Outline thickness / Corner roundness | Same 4 sliders as OmaDeezer's popup, same ranges and defaults. Blur sets Hyprland's *global* `decoration.blur.size` (affects every blurred surface, not just this overlay); the other three only reshape this overlay's own card. "Reset visual settings to defaults" restores all four |
+
+The settings panel scrolls (mouse wheel/drag) if it doesn't fit the overlay's height - the sliders live at the bottom.
 
 ## How actions work
 

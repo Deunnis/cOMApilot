@@ -20,6 +20,23 @@ Column {
   property string fontFamily: Style.font.menuFamily
 
   signal changed(string key, var value)
+  // Separate from `changed` above: fired continuously while dragging one of
+  // the visual sliders below (no disk write - Copilot.qml just mirrors it
+  // into a "live" property for instant visual feedback) vs. once on release
+  // (the actual persisted commit) - same live/commit split as OmaDeezer's
+  // own slider settings, to avoid writing shell.json on every drag tick.
+  signal sliderLive(string key, var value)
+  signal sliderReleased(string key, var value)
+  signal resetVisualRequested()
+
+  // Same 4 tunable visual settings as OmaDeezer's popup, same ranges/
+  // defaults - single source of truth for the sliders below.
+  readonly property var visualSliderDefs: [
+    { key: "blur", label: "Blur", from: 0, to: 100, def: 40 },
+    { key: "transparency", label: "Transparency", from: 0, to: 100, def: 40 },
+    { key: "borderWidth", label: "Outline thickness", from: 0, to: 6, def: 2 },
+    { key: "cornerRadius", label: "Corner roundness", from: 0, to: 20, def: 2 }
+  ]
 
   // "checking" | "set" | "unset"
   property string apiKeyStatus: "checking"
@@ -287,5 +304,69 @@ Column {
         onClicked: root.clearKey()
       }
     }
+  }
+
+  PanelSeparator {
+    width: parent.width
+    foreground: root.foreground
+  }
+
+  Repeater {
+    model: root.visualSliderDefs
+
+    Column {
+      id: sliderRow
+      required property var modelData
+
+      width: parent.width
+      spacing: Style.spacing.xs
+
+      Item {
+        width: parent.width
+        height: sliderLabel.implicitHeight
+
+        Text {
+          id: sliderLabel
+          anchors.left: parent.left
+          text: sliderRow.modelData.label
+          color: root.foreground
+          opacity: 0.75
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          anchors.right: parent.right
+          text: String(root.settings[sliderRow.modelData.key] !== undefined ? root.settings[sliderRow.modelData.key] : sliderRow.modelData.def)
+          color: root.foreground
+          opacity: 0.55
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+      }
+
+      PanelSlider {
+        width: parent.width
+        minimum: sliderRow.modelData.from
+        maximum: sliderRow.modelData.to
+        integer: true
+        value: root.settings[sliderRow.modelData.key] !== undefined ? root.settings[sliderRow.modelData.key] : sliderRow.modelData.def
+        trackColor: Util.alpha(root.foreground, 0.15)
+        fillColor: root.accentColor
+        knobColor: root.foreground
+        onMoved: function(v) { root.sliderLive(sliderRow.modelData.key, Math.round(v)) }
+        onReleased: function(v) { root.sliderReleased(sliderRow.modelData.key, Math.round(v)) }
+      }
+    }
+  }
+
+  Button {
+    width: parent.width
+    text: "Reset visual settings to defaults"
+    tooltipText: "Blur, transparency, outline, and corner roundness back to their defaults"
+    bordered: true
+    foreground: root.foreground
+    accent: root.accentColor
+    onClicked: root.resetVisualRequested()
   }
 }

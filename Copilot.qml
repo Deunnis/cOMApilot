@@ -34,7 +34,11 @@ Item {
     includeClipboardContext: false,
     includeActiveWindowContext: false,
     maxContextChars: 4000,
-    actionsEnabled: false
+    actionsEnabled: false,
+    blur: 40,
+    transparency: 40,
+    borderWidth: 2,
+    cornerRadius: 2
   })
   property bool settingsOpen: false
 
@@ -72,7 +76,11 @@ Item {
       includeClipboardContext: false,
       includeActiveWindowContext: false,
       maxContextChars: 4000,
-      actionsEnabled: false
+      actionsEnabled: false,
+      blur: 40,
+      transparency: 40,
+      borderWidth: 2,
+      cornerRadius: 2
     }
     if (found) for (var k in found) if (k !== "id") merged[k] = found[k]
     root.settings = merged
@@ -92,14 +100,73 @@ Item {
   }
 
   // ---------------------------------------------------------------- chrome
+  //
+  // blur/transparency/borderWidth/cornerRadius mirror OmaDeezer's popup
+  // settings exactly (same ranges/defaults, same live-drag-then-persist
+  // pattern) at the user's request. Each has a "live" mirror that a slider
+  // updates continuously while dragging (no disk writes mid-drag) and which
+  // gets rebound to the persisted value via relive() once the drag commits -
+  // see VISUAL_SLIDER_DEFS and relive() below.
 
-  property color background: Color.menu.background
+  property color background: Qt.tint(Util.alpha(Color.menu.background, 1 - root.liveTransparency / 100), Util.alpha(root.accentColor, 0.12))
   property color foreground: Color.menu.text
   property color border: Color.menu.border
-  property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
+  property var borderSpec: Border.flat(root.border, Style.space(root.liveBorderWidth))
   property color scrim: Color.menu.scrim
-  readonly property int cornerRadius: Style.cornerRadius
+  readonly property int cornerRadius: Style.space(root.liveCornerRadius)
   property string fontFamily: Style.font.menuFamily
+
+  readonly property var visualSliderDefs: [
+    { key: "blur", label: "Blur", from: 0, to: 100, def: 40 },
+    { key: "transparency", label: "Transparency", from: 0, to: 100, def: 40 },
+    { key: "borderWidth", label: "Outline thickness", from: 0, to: 6, def: 2 },
+    { key: "cornerRadius", label: "Corner roundness", from: 0, to: 20, def: 2 }
+  ]
+
+  property int liveBlur: 40
+  property int liveTransparency: 40
+  property int liveBorderWidth: 2
+  property int liveCornerRadius: 2
+
+  function liveKeyFor(key) { return "live" + key.charAt(0).toUpperCase() + key.slice(1) }
+
+  function visualDefaultFor(key) {
+    for (var i = 0; i < root.visualSliderDefs.length; i++) if (root.visualSliderDefs[i].key === key) return root.visualSliderDefs[i].def
+    return 0
+  }
+
+  // (Re)binds live<Key> to follow root.settings[key] (falling back to def)
+  // until the next drag breaks the binding by assigning a literal value -
+  // called once at startup for all four, and again after each one's own
+  // slider release re-persists it.
+  function relive(key, def) {
+    root[root.liveKeyFor(key)] = Qt.binding(function() {
+      return root.settings[key] !== undefined ? root.settings[key] : def
+    })
+  }
+
+  function resetVisualDefaults() {
+    var entry = {}
+    for (var k in root.settings) entry[k] = root.settings[k]
+    for (var i = 0; i < root.visualSliderDefs.length; i++) entry[root.visualSliderDefs[i].key] = root.visualSliderDefs[i].def
+    root.settings = entry
+    if (root.shell && typeof root.shell.updateEntryInline === "function")
+      root.shell.updateEntryInline(root.moduleName, entry)
+    for (var j = 0; j < root.visualSliderDefs.length; j++) root.relive(root.visualSliderDefs[j].key, root.visualSliderDefs[j].def)
+  }
+
+  // Same global side effect as OmaDeezer's identical slider: this sets
+  // Hyprland's *global* decoration.blur.size, so turning it up blurs behind
+  // every window/layer, not just this overlay.
+  function applyBlur() {
+    var size = Math.round(root.liveBlur / 100 * 20)
+    blurProc.command = ["hyprctl", "eval", "hl.config({decoration={blur={size=" + size + "}}})"]
+    blurProc.running = true
+  }
+
+  Process { id: blurProc }
+
+  onLiveBlurChanged: root.applyBlur()
   property int contentMargin: Style.spacing.panelPadding
   property int contentSpacing: Style.spacing.md
   property int cardWidth: Math.min(Style.space(700), panel.width - Style.gapsOut * 2)
@@ -157,7 +224,6 @@ Item {
     if (root.opened) root.close()
     else root.open("{}")
   }
-
 
   // ------------------------------------------------------------ conversation
 
@@ -402,6 +468,8 @@ Item {
   Component.onCompleted: {
     reqCacheInitProc.running = true
     stateDirInitProc.running = true
+    for (var i = 0; i < root.visualSliderDefs.length; i++) root.relive(root.visualSliderDefs[i].key, root.visualSliderDefs[i].def)
+    root.applyBlur()
   }
 
   // Confirmed by direct testing, in this order: (1) setting `.running =
@@ -870,15 +938,34 @@ Item {
             width: parent.width
             height: parent.height - Style.font.heading - Style.spacing.sm - root.contentSpacing
 
-            SettingsPanel {
-              id: settingsPanel
-              anchors { top: parent.top; left: parent.left; right: parent.right }
+            // The settings panel outgrew a single fixed-height card once the
+            // visual sliders were added at the bottom - wrapped in a
+            // Flickable so it scrolls (mouse wheel/drag) instead of silently
+            // overflowing past the card's edge.
+            Flickable {
+              id: settingsScroll
+              anchors.fill: parent
               visible: root.settingsOpen
-              settings: root.settings
-              foreground: root.foreground
-              accentColor: root.accentColor
-              fontFamily: root.fontFamily
-              onChanged: function(key, value) { root.persistSetting(key, value) }
+              clip: true
+              contentWidth: width
+              contentHeight: settingsPanel.implicitHeight
+              boundsBehavior: Flickable.StopAtBounds
+
+              SettingsPanel {
+                id: settingsPanel
+                width: settingsScroll.width
+                settings: root.settings
+                foreground: root.foreground
+                accentColor: root.accentColor
+                fontFamily: root.fontFamily
+                onChanged: function(key, value) { root.persistSetting(key, value) }
+                onSliderLive: function(key, value) { root[root.liveKeyFor(key)] = value }
+                onSliderReleased: function(key, value) {
+                  root.persistSetting(key, value)
+                  root.relive(key, root.visualDefaultFor(key))
+                }
+                onResetVisualRequested: root.resetVisualDefaults()
+              }
             }
 
             Column {
