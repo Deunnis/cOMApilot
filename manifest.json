@@ -29,9 +29,9 @@
       "actionsEnabled": false
     },
     "schema": [
-      { "key": "backend", "type": "enum", "label": "Backend", "options": ["openai-compatible", "anthropic"], "defaultValue": "openai-compatible" },
+      { "key": "backend", "type": "enum", "label": "Backend", "options": ["openai-compatible", "anthropic", "ollama"], "defaultValue": "openai-compatible" },
       { "key": "model", "type": "string", "label": "Model", "defaultValue": "gpt-4o-mini" },
-      { "key": "endpointUrl", "type": "string", "label": "Endpoint URL", "description": "Chat-completions endpoint. Change this to point at OpenRouter, a local server, etc. Ignored for the Anthropic backend.", "defaultValue": "https://api.openai.com/v1/chat/completions" },
+      { "key": "endpointUrl", "type": "string", "label": "Endpoint URL", "description": "Chat-completions endpoint. Change this to point at OpenRouter, a local server, etc. Ignored for the Anthropic and Ollama backends.", "defaultValue": "https://api.openai.com/v1/chat/completions" },
       { "key": "streaming", "type": "boolean", "label": "Stream responses", "defaultValue": true },
       { "key": "includeClipboardContext", "type": "boolean", "label": "Include clipboard as context", "description": "Sends your current clipboard text along with each prompt, clearly labeled as untrusted data.", "defaultValue": false },
       { "key": "includeActiveWindowContext", "type": "boolean", "label": "Include active window as context", "description": "Sends the focused window's title and app id along with each prompt.", "defaultValue": false },

@@ -12,6 +12,10 @@ function buildRequest(settings, apiKey, messages) {
     bodyJson: JSON.stringify({
       model: settings.model,
       stream: true,
+      // Without this, an OpenAI-compatible stream's final chunk carries no
+      // usage object at all - confirmed against the real OpenAI API. Extra
+      // unrecognized request fields are harmless on servers that ignore it.
+      stream_options: { include_usage: true },
       messages: messages
     })
   }

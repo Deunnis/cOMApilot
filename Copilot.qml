@@ -157,6 +157,56 @@ Item {
     return rows
   }
 
+  // ------------------------------------------------------- session persistence
+  //
+  // Resumes the single ongoing conversation across shell restarts/reloads -
+  // not a multi-session manager, just continuity. State (not settings, so it
+  // doesn't belong in shell.json) lives in the standard XDG state dir via a
+  // declarative FileView rather than the mktemp/curl-style Process chain used
+  // for secrets above - there's no argv-visibility concern for plain
+  // (non-secret) conversation text, so the simpler API is fine here.
+  // Actions are deliberately NOT restored - they're tied to a live session's
+  // execution state, and re-offering a stale, possibly-already-run action
+  // after a restart would be confusing at best.
+
+  property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy/io.github.omacopilot"
+  // Capped so the file can't grow unbounded over months of daily use.
+  property int maxPersistedMessages: 200
+
+  Process {
+    id: stateDirInitProc
+    command: ["mkdir", "-p", root.stateDir]
+  }
+
+  FileView {
+    id: sessionFile
+    path: root.stateDir + "/conversation.json"
+    preload: true
+    printErrors: false
+    onLoaded: root.restoreConversation()
+    onLoadFailed: function(error) {} // FileNotFound is expected on first run
+  }
+
+  function restoreConversation() {
+    var raw = sessionFile.text()
+    if (!raw) return
+    var rows
+    try { rows = JSON.parse(raw) } catch (e) { return }
+    if (!Array.isArray(rows)) return
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i]
+      if (!r || typeof r.role !== "string" || typeof r.content !== "string") continue
+      conversation.append({ role: r.role, content: r.content, streaming: false, error: r.error || "" })
+    }
+    Qt.callLater(function() { conversationList.positionViewAtEnd() })
+  }
+
+  function persistConversation() {
+    var rows = root.snapshotRows()
+    if (rows.length > root.maxPersistedMessages) rows = rows.slice(rows.length - root.maxPersistedMessages)
+    sessionFile.setText(JSON.stringify(rows))
+  }
+
   function sendPrompt(text) {
     var trimmed = String(text || "").trim()
     if (!trimmed) return
@@ -198,6 +248,7 @@ Item {
     }
     root.assistantRowIndex = -1
     root.pendingBuffer = ""
+    root.persistConversation()
   }
 
   function finishAssistantError(message) {
@@ -207,6 +258,7 @@ Item {
     }
     root.assistantRowIndex = -1
     root.pendingBuffer = ""
+    root.persistConversation()
   }
 
   // ------------------------------------------------------- streaming request
@@ -306,23 +358,107 @@ Item {
       root.tryStartRequest()
     }
   }
-  Component.onCompleted: reqCacheInitProc.running = true
+  Component.onCompleted: {
+    reqCacheInitProc.running = true
+    stateDirInitProc.running = true
+  }
+
+  // Confirmed by direct testing, in this order: (1) setting `.running =
+  // false` on an already-running Process does NOT terminate the underlying
+  // OS process (a curl mid-SSE-stream was still alive 30+ seconds after
+  // doing exactly that); (2) `.signal(15)` *also* silently fails to kill it
+  // (confirmed via a debug log that the call really was reached with
+  // `running == true`, yet the process lingered indefinitely); (3) a plain
+  // `kill -15 <pid>` run from a normal shell against that exact same PID
+  // killed it instantly. So neither QML-side API actually delivers the
+  // signal on this Quickshell build - an external `kill` process using
+  // `.processId` is what actually works. Multiple potentially-running PIDs
+  // are batched into one `kill` call for the same reason rmReqFiles()
+  // batches its `rm` calls above: reassigning .command on an
+  // already-triggered shared Process before it's actually started just
+  // reconfigures that pending run rather than queuing a second one.
+  function cancelInFlightRequest() {
+    root.wantedRequestId += 1
+    var pids = []
+    if (apiKeyLookupProc.running && apiKeyLookupProc.processId) pids.push(String(apiKeyLookupProc.processId))
+    if (clipboardReadProc.running && clipboardReadProc.processId) pids.push(String(clipboardReadProc.processId))
+    if (mktempProc.running && mktempProc.processId) pids.push(String(mktempProc.processId))
+    if (writeBodyProc.running && writeBodyProc.processId) pids.push(String(writeBodyProc.processId))
+    if (writeConfigProc.running && writeConfigProc.processId) pids.push(String(writeConfigProc.processId))
+    if (curlProc.running && curlProc.processId) pids.push(String(curlProc.processId))
+    if (pids.length > 0) {
+      killHelperProc.command = ["kill", "-15"].concat(pids)
+      killHelperProc.running = true
+    }
+  }
+
+  Process { id: killHelperProc }
+
+  // Set only by stopGenerating() below - distinguishes "the in-flight chain
+  // was cancelled because a *new* prompt is about to replace it" (the normal
+  // startRequest() path, where tryStartRequest() SHOULD immediately pick up
+  // the new wantedRequestId) from "the user explicitly asked to stop, full
+  // stop." Without this flag, a killed stage's own onExited still fires
+  // (kill takes a moment) and its stageFinished() mismatch correctly detects
+  // the cancellation, but its "not matched" cleanup path unconditionally
+  // calls tryStartRequest() again - which, seeing the same still-pending
+  // wantedRequestId and no other reason to refuse, would immediately start
+  // a brand new request chain nobody asked for (confirmed by direct
+  // testing: Stop killed the visible curl, then a *second*, different-PID
+  // curl process appeared moments later for the exact same prompt, with
+  // nowhere in the UI for its output to go since assistantRowIndex was
+  // already -1 - a real, confirmed resource leak, not a hypothetical one).
+  property bool suppressAutoStart: false
 
   function startRequest() {
-    root.wantedRequestId += 1
-    if (apiKeyLookupProc.running) apiKeyLookupProc.running = false
-    if (clipboardReadProc.running) clipboardReadProc.running = false
-    if (mktempProc.running) mktempProc.running = false
-    if (writeBodyProc.running) writeBodyProc.running = false
-    if (writeConfigProc.running) writeConfigProc.running = false
-    if (curlProc.running) curlProc.running = false
+    root.suppressAutoStart = false
+    root.cancelInFlightRequest()
     root.tryStartRequest()
+  }
+
+  // Called from the input row's Stop button. Cancels whatever stage of the
+  // chain is currently in flight and finalizes the row with whatever partial
+  // content already streamed in - same outcome as a dropped connection.
+  function stopGenerating() {
+    if (root.assistantRowIndex === -1) return
+    root.cancelInFlightRequest()
+    root.suppressAutoStart = true
+    root.finishAssistantMessage()
+  }
+
+  // Drops the last assistant reply (and any action cards on it) and re-asks
+  // the same last user prompt. Only meaningful once a first exchange exists
+  // and nothing is currently streaming.
+  function regenerateLast() {
+    if (root.assistantRowIndex !== -1) return
+    if (conversation.count < 2) return
+    var lastIdx = conversation.count - 1
+    if (conversation.get(lastIdx).role !== "assistant") return
+    if (conversation.get(lastIdx - 1).role !== "user") return
+    conversation.remove(lastIdx)
+    root.setRowActions(lastIdx, [])
+    conversation.append({ role: "assistant", content: "", streaming: true, error: "" })
+    root.assistantRowIndex = conversation.count - 1
+    root.pendingBuffer = ""
+    Qt.callLater(function() { conversationList.positionViewAtEnd() })
+    root.startRequest()
+  }
+
+  function formatUsage(usage) {
+    if (!usage) return ""
+    var input = usage.prompt_tokens !== undefined ? usage.prompt_tokens : usage.input_tokens
+    var output = usage.completion_tokens !== undefined ? usage.completion_tokens : usage.output_tokens
+    var parts = []
+    if (input !== undefined) parts.push(input + " in")
+    if (output !== undefined) parts.push(output + " out")
+    return parts.join(" · ")
   }
 
   // First stage of the chain: a fresh secret-tool lookup right before every
   // send (not a cached property) so a key stored/changed in SettingsPanel
   // mid-session is picked up on the very next prompt with no extra wiring.
   function tryStartRequest() {
+    if (root.suppressAutoStart) return
     if (root.runningRequestId !== -1) return
     if (!root.reqCacheReady) return
     if (root.wantedRequestId === 0) return // nothing has ever been sent yet
@@ -711,7 +847,8 @@ Item {
                 id: conversationList
                 width: parent.width
                 height: parent.height - inputRow.height - root.contentSpacing -
-                  (contextIndicator.visible ? contextIndicator.height + root.contentSpacing : 0)
+                  (contextIndicator.visible ? contextIndicator.height + root.contentSpacing : 0) -
+                  (usageIndicator.visible ? usageIndicator.height + root.contentSpacing : 0)
                 clip: true
                 model: conversation
                 spacing: Style.spacing.md
@@ -758,6 +895,15 @@ Item {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     wrapMode: Text.WordWrap
+                  }
+
+                  Button {
+                    text: "Regenerate"
+                    bordered: true
+                    foreground: root.foreground
+                    visible: !bubble.streaming && bubble.role === "assistant"
+                      && bubble.index === conversation.count - 1 && root.assistantRowIndex === -1
+                    onClicked: root.regenerateLast()
                   }
 
                   Column {
@@ -848,6 +994,18 @@ Item {
                 font.pixelSize: Style.font.caption
               }
 
+              Text {
+                id: usageIndicator
+                width: parent.width
+                visible: root.lastUsage !== null
+                text: root.formatUsage(root.lastUsage) + " tokens (last reply)"
+                horizontalAlignment: Text.AlignRight
+                color: root.foreground
+                opacity: 0.45
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
               Row {
                 id: inputRow
                 width: parent.width
@@ -868,12 +1026,16 @@ Item {
 
                 Button {
                   id: sendButton
-                  text: "Send"
+                  text: root.assistantRowIndex !== -1 ? "Stop" : "Send"
                   bordered: true
                   foreground: root.foreground
                   onClicked: {
-                    root.sendPrompt(promptField.text)
-                    promptField.text = ""
+                    if (root.assistantRowIndex !== -1) {
+                      root.stopGenerating()
+                    } else {
+                      root.sendPrompt(promptField.text)
+                      promptField.text = ""
+                    }
                   }
                 }
               }

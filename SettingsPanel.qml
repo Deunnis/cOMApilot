@@ -3,6 +3,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Secrets.js" as Secrets
+import "OllamaProbe.js" as OllamaProbe
 
 // Non-secret fields (backend/model/endpoint/streaming) are read from and
 // written back to `settings` by the caller (Copilot.qml), exactly like
@@ -46,8 +47,40 @@ Column {
     clearProc.running = true
   }
 
+  // "checking" | "detected" | "not-detected"
+  property string ollamaStatus: "checking"
+  property var ollamaModels: []
+
+  function refreshOllamaStatus() {
+    ollamaStatus = "checking"
+    ollamaProbeProc.command = OllamaProbe.probeCommand()
+    ollamaProbeProc.running = true
+  }
+
   onSettingsChanged: refreshKeyStatus()
-  Component.onCompleted: refreshKeyStatus()
+  Component.onCompleted: {
+    refreshKeyStatus()
+    refreshOllamaStatus()
+  }
+  // Probed when the panel becomes visible, not per-keystroke - this Column
+  // is created once and just toggled visible/invisible by Copilot.qml
+  // rather than re-instantiated, so Component.onCompleted alone would only
+  // ever probe once for the whole overlay's lifetime.
+  onVisibleChanged: if (visible) refreshOllamaStatus()
+
+  Process {
+    id: ollamaProbeProc
+    stdout: StdioCollector { id: ollamaProbeOut; waitForEnd: true }
+    onExited: function(code) {
+      if (code === 0) {
+        root.ollamaModels = OllamaProbe.parseModelNames(ollamaProbeOut.text)
+        root.ollamaStatus = "detected"
+      } else {
+        root.ollamaModels = []
+        root.ollamaStatus = "not-detected"
+      }
+    }
+  }
 
   Process {
     id: lookupProc
@@ -82,14 +115,45 @@ Column {
     width: parent.width
     label: "Backend"
     value: root.backendValue()
-    options: ["openai-compatible", "anthropic"]
+    options: ["openai-compatible", "anthropic", "ollama"]
     foreground: root.foreground
     fontFamily: root.fontFamily
-    onChanged: function(value) { root.changed("backend", value) }
+    onChanged: function(value) {
+      root.changed("backend", value)
+      // Ollama's endpoint is fixed (not user-edited, see endpointField's
+      // visibility below) - fill it in automatically so OpenAiCompatBackend
+      // (reused unchanged for this backend) has a working URL right away.
+      if (value === "ollama") root.changed("endpointUrl", OllamaProbe.OLLAMA_ENDPOINT_URL)
+    }
+  }
+
+  Text {
+    visible: root.backendValue() === "ollama"
+    width: parent.width
+    text: root.ollamaStatus === "checking" ? "Checking for a local Ollama server…"
+      : root.ollamaStatus === "detected" ? ("Ollama detected - " + root.ollamaModels.length + " model(s) available")
+      : "Ollama not detected at localhost:11434 - make sure it's running"
+    color: root.foreground
+    opacity: 0.65
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.WordWrap
+  }
+
+  Dropdown {
+    visible: root.backendValue() === "ollama" && root.ollamaModels.length > 0
+    width: parent.width
+    label: "Model"
+    value: root.settings.model || ""
+    options: root.ollamaModels
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    onChanged: function(value) { root.changed("model", value) }
   }
 
   TextField {
     id: modelField
+    visible: root.backendValue() !== "ollama" || root.ollamaModels.length === 0
     width: parent.width
     placeholderText: "Model"
     text: root.settings.model || ""
@@ -101,7 +165,7 @@ Column {
   TextField {
     id: endpointField
     width: parent.width
-    visible: root.backendValue() !== "anthropic"
+    visible: root.backendValue() !== "anthropic" && root.backendValue() !== "ollama"
     height: visible ? implicitHeight : 0
     placeholderText: "Endpoint URL"
     text: root.settings.endpointUrl || ""
@@ -164,6 +228,7 @@ Column {
   Column {
     width: parent.width
     spacing: Style.spacing.sm
+    visible: root.backendValue() !== "ollama"
 
     Text {
       width: parent.width

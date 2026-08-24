@@ -48,6 +48,14 @@ function parseSseLine(rawLine, state) {
     var err = obj.error || obj
     return { error: (err && err.message) || JSON.stringify(obj) }
   }
+  // Input token count only ever arrives once, in message_start - message_delta's
+  // usage later in the stream carries just the (cumulative) output_tokens, so
+  // it's stashed on state here and merged back in below.
+  if (state.currentEvent === "message_start") {
+    var startUsage = obj.message && obj.message.usage
+    if (startUsage && startUsage.input_tokens !== undefined) state.inputTokens = startUsage.input_tokens
+    return null
+  }
   if (state.currentEvent === "message_stop") return { done: true }
   if (state.currentEvent === "content_block_delta") {
     var delta = obj.delta
@@ -57,7 +65,9 @@ function parseSseLine(rawLine, state) {
     return null
   }
   if (state.currentEvent === "message_delta" && obj.usage) {
-    return { usage: obj.usage }
+    var usage = { output_tokens: obj.usage.output_tokens }
+    if (state.inputTokens !== undefined) usage.input_tokens = state.inputTokens
+    return { usage: usage }
   }
   return null
 }
