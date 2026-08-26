@@ -327,7 +327,10 @@ Item {
   FileView {
     id: sessionFile
     path: root.stateDir + "/conversation.json"
-    preload: true
+    // Deliberately NOT preloaded - see statSessionFile()/sessionFileStatProc
+    // below for why. Only ever (re)loaded explicitly via reload(), once a
+    // cheap `stat` has already confirmed the file is within bounds.
+    preload: false
     printErrors: false
     // Atomic so a crash mid-write can never leave a half-written/corrupt
     // JSON file behind; chmod'd to owner-only on every successful save
@@ -344,10 +347,51 @@ Item {
 
   Process { id: chmodSessionFileProc }
 
+  // A FileView with preload (or a bare .text()/.reload() call) reads the
+  // *entire* file into memory before restoreConversation() ever gets a
+  // chance to check its size - the maxSessionFileBytes check there was
+  // only ever deciding whether to *use* data Quickshell had already fully
+  // materialized, not preventing that allocation. `stat` reads only
+  // filesystem metadata (O(1) regardless of the file's actual size), so
+  // checking size this way first - and only calling sessionFile.reload()
+  // when it's within bounds - means an oversized file's contents are never
+  // read into this process's memory at all.
+  function statSessionFile() {
+    sessionFileStatProc.command = ["stat", "-c%s", "--", sessionFile.path]
+    sessionFileStatProc.running = true
+  }
+
+  Process {
+    id: sessionFileStatProc
+    stdout: StdioCollector { id: sessionFileStatOut; waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) return // no file yet - nothing to restore, expected on first run
+      var size = parseInt(String(sessionFileStatOut.text || "").trim(), 10)
+      if (!isFinite(size)) return
+      if (size > root.maxSessionFileBytes) {
+        console.warn("cOMApilot: session file is " + size + " bytes (over the " + root.maxSessionFileBytes + " byte limit) - refusing to load it at all")
+        return
+      }
+      // Confirmed by direct testing: with preload:false, calling
+      // sessionFile.text() here returns empty immediately (nothing loaded
+      // yet) but kicks off FileView's real async read in the background -
+      // this call is a deliberate no-op on its first pass (raw is falsy,
+      // see below) that exists purely to trigger that read; the *real*
+      // restore happens moments later when it completes and the FileView's
+      // own onLoaded (still wired below) calls this same function again,
+      // that time with the actual content.
+      root.restoreConversation()
+    }
+  }
+
   function restoreConversation() {
     var raw = sessionFile.text()
     if (!raw) return
     if (raw.length > root.maxSessionFileBytes) {
+      // Belt-and-suspenders: statSessionFile() above should already have
+      // refused to reload() past this point, but if the file grew between
+      // the stat and the actual read (a real, if narrow, TOCTOU window),
+      // don't act on more than we bounded for.
       console.warn("cOMApilot: session file is " + raw.length + " bytes (over the " + root.maxSessionFileBytes + " byte limit) - refusing to restore it")
       return
     }
@@ -552,6 +596,7 @@ Item {
   Component.onCompleted: {
     reqCacheInitProc.running = true
     stateDirInitProc.running = true
+    root.statSessionFile()
     for (var i = 0; i < root.visualSliderDefs.length; i++) root.relive(root.visualSliderDefs[i].key, root.visualSliderDefs[i].def)
     root.applyBlur()
     root.applyBlurLayerRule()
@@ -811,7 +856,21 @@ Item {
       // plain --fail would suppress it entirely - while making curl exit
       // non-zero so onExited's failure path actually fires instead of the
       // stream quietly "finishing" with no delta and no done.
-      curlProc.command = ["curl", "-N", "-sS", "--fail-with-body", "--max-time", "120", "-K", root.activeBasePath + ".cfg"]
+      //
+      // --max-filesize enforces the response-size cap at the transport
+      // layer, before any byte reaches Quickshell's own SplitParser/onRead
+      // - the maxSseLineChars/maxAssistantContentChars caps in JS only
+      // bound what we do with data *after* it's already been read into
+      // memory by SplitParser, which buffers a full line internally before
+      // onRead ever fires. A hostile/misbehaving server sending an
+      // extremely long unterminated "line" (or just an enormous total
+      // response) would otherwise be fully buffered by Quickshell first,
+      // regardless of the JS-level caps. Confirmed this curl build
+      // (8.21.0, >= the 8.4.0 fix) enforces this cutoff even for a
+      // streamed/chunked response with no advertised Content-Length, per
+      // `man curl`'s own note on --max-filesize - not just a pre-flight
+      // check against a declared size. 10M is far beyond any real reply.
+      curlProc.command = ["curl", "-N", "-sS", "--fail-with-body", "--max-time", "120", "--max-filesize", "10M", "-K", root.activeBasePath + ".cfg"]
       curlProc.running = true
     }
   }
@@ -853,6 +912,9 @@ Item {
   // body is still a plain JSON error object (not SSE), so try to pull a
   // real provider message out of it before falling back to raw text/stderr.
   function describeRequestFailure(code, stdoutBuffer, stderrDetail) {
+    // curl exit 63: --max-filesize was exceeded - the response was cut off
+    // at the transport layer for being too large, not a provider error.
+    if (code === 63) return "The response was too large and was cut off."
     var trimmed = String(stdoutBuffer || "").trim()
     if (trimmed) {
       try {
