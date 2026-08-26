@@ -327,9 +327,11 @@ Item {
   FileView {
     id: sessionFile
     path: root.stateDir + "/conversation.json"
-    // Deliberately NOT preloaded - see statSessionFile()/sessionFileStatProc
-    // below for why. Only ever (re)loaded explicitly via reload(), once a
-    // cheap `stat` has already confirmed the file is within bounds.
+    // Deliberately NOT preloaded, and never read via .text()/.reload() -
+    // see loadSessionFile()/sessionFileReadProc below. FileView is used for
+    // writing only; restoring is done entirely through a separate
+    // descriptor-pinned reader process so this file's on-disk content is
+    // never trusted or materialized by FileView itself.
     preload: false
     printErrors: false
     // Atomic so a crash mid-write can never leave a half-written/corrupt
@@ -337,8 +339,6 @@ Item {
     // (via onSaved below) since this holds real conversation content, not
     // meant to be world-readable by default file-creation permissions.
     atomicWrites: true
-    onLoaded: root.restoreConversation()
-    onLoadFailed: function(error) {} // FileNotFound is expected on first run
     onSaved: {
       chmodSessionFileProc.command = ["chmod", "600", sessionFile.path]
       chmodSessionFileProc.running = true
@@ -347,54 +347,63 @@ Item {
 
   Process { id: chmodSessionFileProc }
 
-  // A FileView with preload (or a bare .text()/.reload() call) reads the
-  // *entire* file into memory before restoreConversation() ever gets a
-  // chance to check its size - the maxSessionFileBytes check there was
-  // only ever deciding whether to *use* data Quickshell had already fully
-  // materialized, not preventing that allocation. `stat` reads only
-  // filesystem metadata (O(1) regardless of the file's actual size), so
-  // checking size this way first - and only calling sessionFile.reload()
-  // when it's within bounds - means an oversized file's contents are never
-  // read into this process's memory at all.
-  function statSessionFile() {
-    sessionFileStatProc.command = ["stat", "-c%s", "--", sessionFile.path]
-    sessionFileStatProc.running = true
+  // Reading this file safely needs more than a size check before a
+  // FileView reload: `stat` (or a check) then a separate open-by-path read
+  // is itself a TOCTOU window - the path can be replaced (e.g. with a
+  // symlink, or a larger file) between the check and the read, and a
+  // FileView reload always re-opens the path fresh rather than reading a
+  // single pinned descriptor. This script instead opens the path exactly
+  // once with O_NOFOLLOW (refuses to follow a symlink planted at this
+  // path) and O_NONBLOCK (so a FIFO planted here can't hang this process
+  // waiting for a writer), fstats *that same descriptor* to reject
+  // anything that isn't a plain regular file, and then reads at most
+  // maxSessionFileBytes+1 bytes from it - so the amount ever read into
+  // this process's memory is bounded by our own read() request size, not
+  // by whatever the file claims to be, regardless of what happens to the
+  // path after the descriptor is opened. Exit codes: 2 = missing/symlink/
+  // unopenable (expected on first run), 3 = not a regular file, 4 = over
+  // the byte limit, 0 = bounded content written to stdout.
+  readonly property string sessionFileReaderScript: [
+    "import os,sys,stat",
+    "path=sys.argv[1]; limit=int(sys.argv[2])",
+    "try:",
+    "    fd=os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)",
+    "except OSError:",
+    "    sys.exit(2)",
+    "try:",
+    "    if not stat.S_ISREG(os.fstat(fd).st_mode):",
+    "        sys.exit(3)",
+    "    chunks=[]; total=0",
+    "    while total <= limit:",
+    "        chunk=os.read(fd, (limit + 1) - total)",
+    "        if not chunk: break",
+    "        chunks.append(chunk); total += len(chunk)",
+    "    if total > limit:",
+    "        sys.exit(4)",
+    "    sys.stdout.buffer.write(b''.join(chunks))",
+    "finally:",
+    "    os.close(fd)"
+  ].join("\n")
+
+  function loadSessionFile() {
+    sessionFileReadProc.command = ["python3", "-c", root.sessionFileReaderScript, sessionFile.path, String(root.maxSessionFileBytes)]
+    sessionFileReadProc.running = true
   }
 
   Process {
-    id: sessionFileStatProc
-    stdout: StdioCollector { id: sessionFileStatOut; waitForEnd: true }
+    id: sessionFileReadProc
+    stdout: StdioCollector { id: sessionFileReadOut; waitForEnd: true }
     onExited: function(code) {
-      if (code !== 0) return // no file yet - nothing to restore, expected on first run
-      var size = parseInt(String(sessionFileStatOut.text || "").trim(), 10)
-      if (!isFinite(size)) return
-      if (size > root.maxSessionFileBytes) {
-        console.warn("cOMApilot: session file is " + size + " bytes (over the " + root.maxSessionFileBytes + " byte limit) - refusing to load it at all")
-        return
-      }
-      // Confirmed by direct testing: with preload:false, calling
-      // sessionFile.text() here returns empty immediately (nothing loaded
-      // yet) but kicks off FileView's real async read in the background -
-      // this call is a deliberate no-op on its first pass (raw is falsy,
-      // see below) that exists purely to trigger that read; the *real*
-      // restore happens moments later when it completes and the FileView's
-      // own onLoaded (still wired below) calls this same function again,
-      // that time with the actual content.
-      root.restoreConversation()
+      if (code === 2) return // no file yet, or not a plain path we'll follow - expected on first run
+      if (code === 3) { console.warn("cOMApilot: session file path is not a regular file - refusing to load it"); return }
+      if (code === 4) { console.warn("cOMApilot: session file is over the " + root.maxSessionFileBytes + " byte limit - refusing to load it"); return }
+      if (code !== 0) return
+      root.restoreConversationFromRaw(sessionFileReadOut.text)
     }
   }
 
-  function restoreConversation() {
-    var raw = sessionFile.text()
+  function restoreConversationFromRaw(raw) {
     if (!raw) return
-    if (raw.length > root.maxSessionFileBytes) {
-      // Belt-and-suspenders: statSessionFile() above should already have
-      // refused to reload() past this point, but if the file grew between
-      // the stat and the actual read (a real, if narrow, TOCTOU window),
-      // don't act on more than we bounded for.
-      console.warn("cOMApilot: session file is " + raw.length + " bytes (over the " + root.maxSessionFileBytes + " byte limit) - refusing to restore it")
-      return
-    }
     var rows
     try { rows = JSON.parse(raw) } catch (e) { return }
     if (!Array.isArray(rows)) return
@@ -596,7 +605,7 @@ Item {
   Component.onCompleted: {
     reqCacheInitProc.running = true
     stateDirInitProc.running = true
-    root.statSessionFile()
+    root.loadSessionFile()
     for (var i = 0; i < root.visualSliderDefs.length; i++) root.relive(root.visualSliderDefs[i].key, root.visualSliderDefs[i].def)
     root.applyBlur()
     root.applyBlurLayerRule()
